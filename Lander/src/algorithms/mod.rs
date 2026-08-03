@@ -1,4 +1,5 @@
 use ndarray::Array1;
+use std::any::Any;
 use crate::state::{SensorData, VehicleState};
 
 pub trait Navigator {
@@ -18,7 +19,7 @@ pub trait GuidancePlanner {
     fn configure(&mut self, max_velocity: f64, lower_thrust_bound: f64, dry_mass: f64) {}
 }
 
-pub trait Controller {
+pub trait Controller: Any {
     fn update(
         &mut self,
         current_state: &Array1<f64>,
@@ -31,6 +32,7 @@ pub trait Controller {
     fn get_horizon_steps(&self) -> usize;
     fn get_time_step(&self) -> f64;
     fn set_flight_phase(&mut self, phase: crate::state::FlightPhase) {}
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 // Module declarations

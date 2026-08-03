@@ -60,6 +60,10 @@ impl Autopilot {
         self.controller.get_time_step()
     }
 
+    pub fn mpc_mut(&mut self) -> Option<&mut crate::algorithms::control::MPC> {
+        self.controller.as_any_mut().downcast_mut::<crate::algorithms::control::MPC>()
+    }
+
     pub fn update_navigator(&mut self, state: &mut ControlLoopState, sensor_data: &SensorData, now: f64, dt: f64) -> bool {
         let in_prelaunch = state.flight_phase == FlightPhase::Standby || state.flight_phase == FlightPhase::Armed;
         if let Some(mut updated_state) = self.navigator.update(sensor_data, dt, in_prelaunch) {

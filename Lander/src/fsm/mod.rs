@@ -250,4 +250,8 @@ impl FlightStateMachine {
         
         None
     }
+
+    pub fn autopilot_mut(&mut self) -> &mut autopilot::Autopilot {
+        &mut self.autopilot
+    }
 }

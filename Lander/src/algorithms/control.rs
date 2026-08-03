@@ -1,4 +1,5 @@
 use ndarray::{Array1, Array2};
+use std::any::Any;
 extern crate MPC as mpc_crate;
 use super::Controller;
 use crate::state::FlightPhase;
@@ -20,6 +21,7 @@ pub struct MPC {
     pub last_solve_time: f64,
     pub flight_phase: FlightPhase,
     pub reset_warm_start: bool,
+    pub manual_weights: bool,
     pub panoc_cache: optimization_engine::panoc::PANOCCache,
 }
 
@@ -43,6 +45,7 @@ impl Clone for MPC {
             last_solve_time: self.last_solve_time,
             flight_phase: self.flight_phase,
             reset_warm_start: self.reset_warm_start,
+            manual_weights: self.manual_weights,
             panoc_cache: optimization_engine::panoc::PANOCCache::new(n_dim_u, 1e-4, 20),
         }
     }
@@ -106,7 +109,29 @@ impl MPC {
             last_solve_time: 0.0,
             flight_phase: FlightPhase::Standby,
             reset_warm_start: false,
+            manual_weights: false,
             panoc_cache,
+        }
+    }
+
+    pub fn set_manual_weights(
+        &mut self,
+        use_manual: bool,
+        q: Option<Array2<f64>>,
+        r: Option<Array2<f64>>,
+        qn: Option<Array2<f64>>,
+    ) {
+        self.manual_weights = use_manual;
+        if use_manual {
+            if let Some(q_mat) = q {
+                self.q = q_mat;
+            }
+            if let Some(r_mat) = r {
+                self.r = r_mat;
+            }
+            if let Some(qn_mat) = qn {
+                self.qn = qn_mat;
+            }
         }
     }
     
@@ -192,53 +217,74 @@ impl Controller for MPC {
     fn set_flight_phase(&mut self, phase: FlightPhase) {
         self.flight_phase = phase;
         self.reset_warm_start = true;
-        match phase {
-            FlightPhase::Ascent => {
-                self.q = Array2::<f64>::from_diag(&Array1::from(vec![
-                    150.0, 150.0, 600.0,
-                    40000.0, 40000.0, 0.0, 0.0,
-                    100.0, 100.0, 2000.0,
-                    500.0, 500.0, 500.0
-                ]));
-                self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 0.005]));
-                self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
-                    150.0, 150.0, 600.0,
-                    50000.0, 50000.0, 0.0, 0.0,
-                    100.0, 100.0, 200.0,
-                    1000.0, 1000.0, 1000.0
-                ]));
+        if !self.manual_weights {
+            match phase {
+                FlightPhase::Ascent => {
+                    self.q = Array2::<f64>::from_diag(&Array1::from(vec![
+                        150.0, 150.0, 600.0,
+                        40000.0, 40000.0, 0.0, 0.0,
+                        100.0, 100.0, 2000.0,
+                        500.0, 500.0, 500.0
+                    ]));
+                    self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 0.005]));
+                    self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
+                        150.0, 150.0, 600.0,
+                        50000.0, 50000.0, 0.0, 0.0,
+                        100.0, 100.0, 200.0,
+                        1000.0, 1000.0, 1000.0
+                    ]));
+                }
+                FlightPhase::Hover => {
+                    self.q = Array2::<f64>::from_diag(&Array1::from(vec![
+                        200.0, 200.0, 800.0,
+                        60000.0, 60000.0, 0.0, 0.0,
+                        100.0, 100.0, 250.0,
+                        500.0, 500.0, 500.0
+                    ]));
+                    self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 1.0]));
+                    self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
+                        200.0, 200.0, 1000.0,
+                        100000.0, 100000.0, 0.0, 0.0,
+                        100.0, 100.0, 300.0,
+                        1000.0, 1000.0, 1000.0
+                    ]));
+                }
+                // FlightPhase::Descent => {
+                //     self.q = Array2::<f64>::from_diag(&Array1::from(vec![
+                //         300.0, 300.0, 800.0,
+                //         100000.0, 100000.0, 0.0, 0.0,
+                //         100.0, 100.0, 6000.0,
+                //         500.0, 500.0, 500.0
+                //     ]));
+                //     self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 0.005]));
+                //     self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
+                //         150.0, 150.0, 50000.0,
+                //         120000.0, 120000.0, 0.0, 0.0,
+                //         100.0, 100.0, 200.0,
+                //         1000.0, 1000.0, 1000.0
+                //     ]));
+                // }
+                FlightPhase::Descent => {
+                    self.q = Array2::<f64>::from_diag(&Array1::from(vec![
+                        300.0, 300.0, 800.0,
+                        100000.0, 100000.0, 0.0, 0.0,
+                        100.0, 100.0, 6000.0,
+                        500.0, 500.0, 500.0
+                    ]));
+                    self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 0.005]));
+                    self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
+                        150.0, 150.0, 50000.0,
+                        120000.0, 120000.0, 0.0, 0.0,
+                        100.0, 100.0, 200.0,
+                        1000.0, 1000.0, 1000.0
+                    ]));
+                }
+                _ => {}
             }
-            FlightPhase::Hover => {
-                self.q = Array2::<f64>::from_diag(&Array1::from(vec![
-                    200.0, 200.0, 800.0,
-                    60000.0, 60000.0, 0.0, 0.0,
-                    100.0, 100.0, 250.0,
-                    500.0, 500.0, 500.0
-                ]));
-                self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 1.0]));
-                self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
-                    200.0, 200.0, 1000.0,
-                    100000.0, 100000.0, 0.0, 0.0,
-                    100.0, 100.0, 300.0,
-                    1000.0, 1000.0, 1000.0
-                ]));
-            }
-            FlightPhase::Descent => {
-                self.q = Array2::<f64>::from_diag(&Array1::from(vec![
-                    300.0, 300.0, 800.0,
-                    100000.0, 100000.0, 0.0, 0.0,
-                    100.0, 100.0, 6000.0,
-                    500.0, 500.0, 500.0
-                ]));
-                self.r = Array2::<f64>::from_diag(&Array1::from(vec![50.0, 50.0, 0.005]));
-                self.qn = Array2::<f64>::from_diag(&Array1::from(vec![
-                    150.0, 150.0, 50000.0,
-                    120000.0, 120000.0, 0.0, 0.0,
-                    100.0, 100.0, 200.0,
-                    1000.0, 1000.0, 1000.0
-                ]));
-            }
-            _ => {}
         }
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
