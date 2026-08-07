@@ -109,7 +109,7 @@ impl FlightStateMachine {
                 }
             },
             FlightPhase::Hover => {
-                if now - self.state.last_state_time >= 20.0 {
+                if now - self.state.last_state_time >= 10.0 {
                     FlightPhase::Descent
                 } else {
                     FlightPhase::Hover
