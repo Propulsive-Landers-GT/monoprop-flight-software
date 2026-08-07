@@ -280,7 +280,7 @@ impl Autopilot {
     fn generate_descent_trajectory(&mut self, state: &mut ControlLoopState, now: f64) {
         let current_pos = state.vehicle_state.position;
         let current_vel = state.vehicle_state.velocity;
-        let landing_point = [0.0, 0.0, 1.0];
+        let landing_point = [0.0, 0.0, 1.5];
         let propellant_mass = state.mass - state.vehicle_state.dry_mass;
         
         self.guidance.configure(15.0, 300.0, state.vehicle_state.dry_mass);
