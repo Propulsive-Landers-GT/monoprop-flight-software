@@ -30,6 +30,10 @@ impl Navigator {
         for i in 12..15 { q[(i, i)] = 0.001; } // wb
         q = q * 0.1;
         
+        Self::new(initial_nominal, initial_p, q)
+    }
+    
+    pub fn new(initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) -> Self {        
         let ekf_es = ErrorStateKalmanFilter::new(
             initial_nominal,
             initial_p,
