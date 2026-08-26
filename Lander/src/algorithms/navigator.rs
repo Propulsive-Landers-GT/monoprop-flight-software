@@ -30,10 +30,6 @@ impl Navigator {
         for i in 12..15 { q[(i, i)] = 0.001; } // wb
         q = q * 0.1;
         
-        Self::new(initial_nominal, initial_p, q)
-    }
-    
-    pub fn new(initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) -> Self {        
         let ekf_es = ErrorStateKalmanFilter::new(
             initial_nominal,
             initial_p,
@@ -109,6 +105,16 @@ impl Navigator {
             mass: 80.0,
             dry_mass: 50.0,
         })
+    }
+
+    fn inject_state(&mut self, initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) {
+        // 🚀 MAP TO THE CORRECT STRUCT FIELDS 🚀
+        self.ekf_es.nominal_state = initial_nominal;
+        self.ekf_es.error_covariance = initial_p;
+        self.ekf_es.process_noise = q;
+        
+        // Reset the update timer so it processes the first IMU tick correctly
+        self.last_update = None;
     }
 }
 

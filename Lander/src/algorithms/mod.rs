@@ -1,10 +1,11 @@
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
 use std::any::Any;
 use crate::state::{SensorData, VehicleState};
 
 pub trait Navigator {
     fn update(&mut self, sensor_data: &SensorData, dt: f64, in_prelaunch: bool) -> Option<VehicleState>;
     fn get_state_vector(&self) -> Option<Array1<f64>>;
+    fn inject_state(&mut self, initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) {}
 }
 
 pub trait GuidancePlanner {

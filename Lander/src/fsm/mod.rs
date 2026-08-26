@@ -254,8 +254,4 @@ impl FlightStateMachine {
     pub fn autopilot_mut(&mut self) -> &mut autopilot::Autopilot {
         &mut self.autopilot
     }
-
-    pub fn navigator_mut(&mut self) -> &mut navigator::Navigator {
-        &mut self.navigator
-    }
 }
