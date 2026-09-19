@@ -372,6 +372,12 @@ impl FlightStateMachine {
         if let Some(reason) = self.check_flight_termination(sensor_data, now) {
             self.state.flight_terminated = true;
             self.state.termination_reason = Some(reason.clone());
+            // step() returns None from here on (callers zero the controls); make the reported
+            // actuation state say the same, as `abort` does, so telemetry does not show stale thrust.
+            self.state.last_gimbal_theta = 0.0;
+            self.state.last_gimbal_phi = 0.0;
+            self.state.last_thrust = 0.0;
+            self.state.last_rcs_command = 0.0;
             self.state.diagnostics_queue.push(format!("Flight terminated! Reason: {}", reason));
             println!("Flight terminated! Reason: {}", reason);
             return None;
