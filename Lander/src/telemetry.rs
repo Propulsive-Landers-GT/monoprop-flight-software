@@ -103,6 +103,11 @@ impl GroundLink {
         }
     }
 
+    /// Sends the current `Params` unprompted (e.g. after the sim rebuilt the vehicle in `--loop` mode).
+    pub fn send_params(&mut self, fsm: &mut FlightStateMachine) {
+        self.link.send(&Downlink::Params(build_params(fsm)));
+    }
+
     /// Call every loop iteration. Sends `Flight` at 50 Hz and `Trajectory` whenever guidance
     /// regenerated it. Events go through `publish_events`, stand data through `publish_stand`.
     pub fn publish(&mut self, fsm: &FlightStateMachine, sensor_data: &SensorData, truth: Option<TruthState>, now: f64) {
@@ -177,12 +182,14 @@ impl GroundLink {
 }
 
 /// Fixed-rate schedule: deadlines advance by `period` (not from "now"), so the average rate is
-/// exact even when the caller's loop period does not divide it. Re-syncs after a stall.
+/// exact even when the caller's loop period does not divide it. Re-syncs after a stall, or
+/// when the clock jumps backwards (the sim restarts its mission clock in `--loop` mode).
 fn rate_due(next_due: &mut f64, period: f64, now: f64) -> bool {
-    if now < *next_due - 1e-6 {
+    let clock_went_back = *next_due - now > period + 1e-6;
+    if now < *next_due - 1e-6 && !clock_went_back {
         return false;
     }
-    *next_due = if now - *next_due > period { now + period } else { *next_due + period };
+    *next_due = if clock_went_back || now - *next_due > period { now + period } else { *next_due + period };
     true
 }
 
@@ -452,6 +459,10 @@ mod tests {
         // After a stall it re-syncs instead of bursting
         assert!(rate_due(&mut next_due, 0.02, 10.0));
         assert!(!rate_due(&mut next_due, 0.02, 10.001));
+        // ... and keeps going when the clock restarts from zero
+        assert!(rate_due(&mut next_due, 0.02, 0.0));
+        assert!(!rate_due(&mut next_due, 0.02, 0.01));
+        assert!(rate_due(&mut next_due, 0.02, 0.02));
     }
 
     #[test]
