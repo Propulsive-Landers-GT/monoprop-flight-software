@@ -143,7 +143,10 @@ fn main() {
             imu_data: Some(state::ImuData {
                 accel: [0.0, 0.0, 9.81],
                 gyro: [0.0, 0.0, 0.0],
-                mag: [-0.04, 0.44, -0.89],
+                // Placeholder: the EKF's world magnetic field [T] as seen by a level vehicle. The previous
+                // unit-vector placeholder [-0.04, 0.44, -0.89] is ~1e4 x the field the magnetometer update
+                // expects and flipped the attitude estimate on the first step (instant tilt termination).
+                mag: [-2.0e-6, 22.0e-6, -44.3e-6],
             }),
             gps_data: Some([0.0, 0.0, 0.0]),
             uwb_data: Some([0.0, 0.0, 0.0]),
