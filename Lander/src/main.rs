@@ -1,6 +1,7 @@
 use Lander::fsm::FlightStateMachine;
 use Lander::state::{self, SensorData};
 use Lander::mcap_logger::McapLogger;
+use Lander::telemetry::{self, GroundLink};
 use std::sync::mpsc::{self, Receiver};
 
 fn spawn_stdin_channel() -> Receiver<String> {
@@ -72,10 +73,17 @@ fn configure_realtime_priority() {
     );
 }
 
+/// UDP port for the ground-station link: first CLI argument, else env `GS_PORT`, else 8888.
+fn ground_link_port() -> u16 {
+    std::env::args().nth(1).and_then(|p| p.parse().ok())
+        .or_else(|| std::env::var("GS_PORT").ok().and_then(|p| p.parse().ok()))
+        .unwrap_or(gs_protocol::DEFAULT_VEHICLE_PORT)
+}
+
 fn main() {
     configure_realtime_priority();
     println!("Lander Flight State Machine Starting...");
-    println!("Interactive console commands: 'arm', 'disarm', 'launch'");
+    println!("Interactive console commands: 'arm', 'disarm', 'launch', 'abort'");
     
     let mut fsm = FlightStateMachine::new();
     fsm.initialize();
@@ -92,6 +100,19 @@ fn main() {
     let mut mcap_logger = McapLogger::new(&log_filename).expect("Failed to initialize MCAP logger");
     println!("Logging telemetry to {}", log_filename);
         
+    // Ground-station link. Telemetry is a convenience, never a reason not to fly.
+    let port = ground_link_port();
+    let mut ground_link = match GroundLink::bind(port, gs_protocol::Source::Vehicle) {
+        Ok(link) => {
+            println!("Ground-station link listening on UDP port {}", port);
+            Some(link)
+        }
+        Err(e) => {
+            println!("[Warning] Could not bind ground-station link on UDP port {}: {}. Continuing without telemetry.", port, e);
+            None
+        }
+    };
+
     println!("FSM running...");
     
     loop {
@@ -104,8 +125,14 @@ fn main() {
                 "arm" => fsm.arm(mission_time),
                 "disarm" => fsm.disarm(mission_time),
                 "launch" => fsm.launch(mission_time),
-                _ => println!("Unknown command: '{}' (valid: 'arm', 'disarm', 'launch')", cmd),
+                "abort" => fsm.abort(mission_time),
+                _ => println!("Unknown command: '{}' (valid: 'arm', 'disarm', 'launch', 'abort')", cmd),
             }
+        }
+
+        // Ground-station commands (non-blocking; interlocks are enforced in Lander::telemetry)
+        if let Some(link) = ground_link.as_mut() {
+            link.handle_commands(&mut fsm, mission_time);
         }
 
         // Initialize sensor readings
@@ -130,9 +157,22 @@ fn main() {
         // Step the flight state machine
         let control_output_opt = fsm.step(&sensor_data);
         
-        // Drain and log FSM diagnostic messages
-        for msg in fsm.get_state_mut().diagnostics_queue.drain(..) {
-            let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
+        // Drain FSM diagnostic messages once: they go to the MCAP log and to the ground station
+        let diagnostics: Vec<String> = fsm.get_state_mut().diagnostics_queue.drain(..).collect();
+        for msg in &diagnostics {
+            let _ = mcap_logger.log_diagnostics(timestamp_ns, msg);
+        }
+
+        let flight_over = fsm.get_state().flight_terminated || fsm.get_state().flight_phase == state::FlightPhase::Landed;
+        if let Some(link) = ground_link.as_mut() {
+            link.publish_events(&diagnostics, mission_time);
+            link.publish_stand(telemetry::build_stand_telemetry(&fsm, &sensor_data, link.source(), mission_time));
+            if flight_over {
+                // The loop exits below: send the end state now, whatever the 50 Hz limiter says
+                link.send_flight(&fsm, &sensor_data, None, mission_time);
+            } else {
+                link.publish(&fsm, &sensor_data, None, mission_time);
+            }
         }
         
         if fsm.get_state().flight_terminated {

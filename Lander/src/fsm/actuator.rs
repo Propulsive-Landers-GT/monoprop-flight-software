@@ -53,6 +53,7 @@ impl ActuatorController {
         let (_, _, roll) = state.vehicle_state.attitude.euler_angles();
         let roll_rate = state.vehicle_state.angular_velocity.z;
         let rcs_command = self.rcs_controller.update(roll, roll_rate, now);
+        state.last_rcs_command = rcs_command;
         
         [
             state.last_gimbal_theta,
