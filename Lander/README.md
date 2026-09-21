@@ -104,6 +104,31 @@ The flight computer binary runs a non-blocking console interface. Operators can 
 *   `arm`: Arms the vehicle (Standby $\rightarrow$ Armed).
 *   `disarm`: Disarms the vehicle back to Standby (Armed $\rightarrow$ Standby).
 *   `launch`: Triggers liftoff (Armed $\rightarrow$ Ascent).
+*   `abort`: Terminates the flight in any phase (controls zeroed, loop stops). In flight this cuts thrust.
+
+---
+
+## Ground Station Link
+
+The flight binary also talks to the GTPL ground station (`ground-station` repo) over UDP using the shared `gs-protocol` crate. The code lives in `src/telemetry.rs` (`GroundLink`) and is reused unchanged by the simulator's `--ground-station` mode, so the GUI exercises the same code against the sim and the vehicle.
+
+*   **Ports**: the vehicle binds UDP `8888` (override with the first CLI argument or the `GS_PORT` environment variable); the ground bridge binds `9999`. Telemetry is sent to whoever last sent a valid packet (the bridge heartbeats at 2 Hz), so nothing is configured on the vehicle. If the port cannot be bound, a warning is printed and the vehicle runs without telemetry.
+*   **Downlink**: `Flight` at 50 Hz (state estimate, actuation, tilt / trajectory-deviation margins, sensor health, link age), `Stand` at 20 Hz (chamber pressure as E-PT, tank pressure as O-PT, valve states), `Trajectory` whenever guidance replans, `Event` for every FSM diagnostic, `Ack` / `Params` on demand.
+*   **Commands** (all acked `Accepted` / `Rejected(reason)` except `Heartbeat` and `Jog`; the vehicle is the authority on interlocks):
+
+    | Command | Accepted when |
+    |---|---|
+    | `Arm` | Standby, control mode Auto |
+    | `Disarm`, `Launch` | Armed |
+    | `Abort` | always (flight terminated, reason "Operator abort") |
+    | `SetPhase(Hover \| Descent)` | Ascent, Hover or Descent. `Hover` re-enters Hover for one hover duration |
+    | `SetFlightParams` | always; range-checked (hover altitude 1-200 m, hover duration 0-120 s, max tilt 5-60 deg, max trajectory deviation 1-50 m) |
+    | `SetMpcWeights` | always; diagonals of Q/R/QN, finite and non-negative. `None` restores the built-in per-phase weights |
+    | `SetControlMode(Jog)` | Standby only; any phase change forces Auto |
+    | `Jog` | control mode Jog; clamped to gimbal +/-15 deg, thrust 0-1200 N; expires after 0.5 s without refresh |
+    | `SetValve` | Standby only. Stored in `valve_overrides` and echoed in `Stand` telemetry; nothing actuates valves yet |
+
+*   **Running with the GUI**: start the bridge from the `ground-station` repo (`cargo run --release --bin gs-bridge`, UI on http://localhost:8080, see its README), then `cargo run` here (or `cargo run -- 8890` for another port). The GUI connects as soon as the bridge's first heartbeat arrives.
 
 ---
 
