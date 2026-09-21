@@ -24,6 +24,4 @@ serde_json = "1.0"
 mcap = "0.25.0"
 libc = "0.2"
 # Ground-station wire protocol (telemetry downlink / command uplink), see src/telemetry.rs.
-# TODO: becomes a git dependency once the ground-station repo is pushed:
-#       gs-protocol = { git = "https://github.com/Propulsive-Landers-GT/ground-station.git" }
-gs-protocol = { path = "../../ground-station/crates/gs-protocol" }
+gs-protocol = { git = "https://github.com/Propulsive-Landers-GT/ground-station.git" }
