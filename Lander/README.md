@@ -128,7 +128,7 @@ The flight binary also talks to the GTPL ground station (`ground-station` repo) 
     | `Jog` | control mode Jog; clamped to gimbal +/-15 deg, thrust 0-1200 N; expires after 0.5 s without refresh |
     | `SetValve` | Standby only. Stored in `valve_overrides` and echoed in `Stand` telemetry; nothing actuates valves yet |
 
-*   **Running with the GUI**: start the bridge from the `ground-station` repo (`cargo run --release --bin gs-bridge`, UI on http://localhost:8080, see its README), then `cargo run` here (or `cargo run -- 8890` for another port). The GUI connects as soon as the bridge's first heartbeat arrives.
+*   **Running with the GUI**: start the bridge from the `ground-system` repo (`cargo run --release --bin gs-bridge`, UI on http://localhost:8080, see its README), then `cargo run` here (or `cargo run -- 8890` for another port). The GUI connects as soon as the bridge's first heartbeat arrives.
 
 ---
 

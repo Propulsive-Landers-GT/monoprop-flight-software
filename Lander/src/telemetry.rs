@@ -259,6 +259,7 @@ pub fn apply_command(fsm: &mut FlightStateMachine, cmd: &Uplink, now: f64) -> Re
             state.diagnostics_queue.push(format!("Valve {} commanded {}", valve_tag(*id), if *open { "OPEN" } else { "CLOSED" }));
             Ok(())
         }
+        CommandKind::Stand(_) => Err("test-stand commands are handled by gs-stand, not the vehicle".to_string()),
     }
 }
 
@@ -421,6 +422,8 @@ pub fn build_stand_telemetry(fsm: &FlightStateMachine, sensor_data: &SensorData,
         source,
         channels,
         valves: build_valve_statuses(fsm),
+        outputs_on: Vec::new(),
+        mtv_percent: None,
     }
 }
 
