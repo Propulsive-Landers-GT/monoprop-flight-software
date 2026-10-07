@@ -1,0 +1,10 @@
+[package]
+name = "esekf_test"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.87"
+
+[dependencies]
+nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
+
+[workspace]
