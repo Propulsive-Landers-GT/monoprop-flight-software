@@ -25,3 +25,5 @@ mcap = "0.25.0"
 libc = "0.2"
 # Ground-station wire protocol (telemetry downlink / command uplink), see src/telemetry.rs.
 gs-protocol = { git = "https://github.com/Propulsive-Landers-GT/ground-system.git" }
+# Vehicle-independent IMU sample type and driver trait (shared no_std crate at the repo root).
+imu = { path = "../imu", features = ["serde"] }
