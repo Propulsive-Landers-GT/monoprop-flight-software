@@ -81,6 +81,18 @@ fn ground_link_port() -> u16 {
         .unwrap_or(gs_protocol::DEFAULT_VEHICLE_PORT)
 }
 
+/// Placeholder IMU degrees of freedom from env `IMU_DOF`: 6 (accel + gyro) or 9 (+ magnetometer, default).
+fn placeholder_imu() -> StaticImu {
+    match std::env::var("IMU_DOF").ok().as_deref().map(str::trim) {
+        None | Some("") | Some("9") => StaticImu::level_at_rest(),
+        Some("6") => StaticImu::level_at_rest_6dof(),
+        Some(other) => {
+            println!("[Warning] IMU_DOF='{}' is not 6 or 9. Using 9-DOF.", other);
+            StaticImu::level_at_rest()
+        }
+    }
+}
+
 fn main() {
     configure_realtime_priority();
     println!("Lander Flight State Machine Starting...");
@@ -94,8 +106,8 @@ fn main() {
     let clock = Clock::new();
 
     // Placeholder IMU until a hardware driver exists: a level vehicle at rest, with the EKF's world
-    // magnetic field [T]. Any type implementing `imu::Imu` can replace it.
-    let mut imu_source = StaticImu::level_at_rest();
+    // magnetic field [T] unless IMU_DOF=6. Any type implementing `imu::Imu` can replace it.
+    let mut imu_source = placeholder_imu();
     println!("IMU: {}", imu_source.info().model);
 
     let timestamp = std::time::SystemTime::now()

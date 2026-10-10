@@ -46,6 +46,16 @@ impl StaticImu {
             .with_mag([-2.0e-6, 22.0e-6, -44.3e-6]);
         Self::new(Self::VN200_INFO, sample)
     }
+
+    /// Same as [`level_at_rest`](Self::level_at_rest) but 6-DOF: accelerometer and
+    /// gyroscope only, no magnetometer.
+    pub fn level_at_rest_6dof() -> Self {
+        let mut info = Self::VN200_INFO;
+        info.model = "Static placeholder, 6-DOF (VN-200 noise figures, no magnetometer)";
+        info.capabilities.mag = false;
+        info.noise.mag_noise = None;
+        Self::new(info, ImuSample::new(0.0, [0.0, 0.0, 9.81], [0.0; 3]))
+    }
 }
 
 impl Imu for StaticImu {
@@ -79,5 +89,14 @@ mod tests {
         assert_eq!(b.accel, [0.0, 0.0, 9.81]);
         assert!(b.mag.is_some());
         assert!(imu.info().capabilities.mag);
+    }
+
+    #[test]
+    fn six_dof_has_no_mag() {
+        let mut imu = StaticImu::level_at_rest_6dof();
+        let s = imu.read(0.0).unwrap().unwrap();
+        assert_eq!(s.accel, [0.0, 0.0, 9.81]);
+        assert_eq!(s.mag, None);
+        assert!(!imu.info().capabilities.mag);
     }
 }
