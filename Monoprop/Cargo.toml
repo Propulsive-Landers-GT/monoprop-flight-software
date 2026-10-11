@@ -2,6 +2,7 @@
 members = [
     "Common",
     "Drone",
+    "Estimation",
     "GroundControl"
 ]
 resolver = "2"
