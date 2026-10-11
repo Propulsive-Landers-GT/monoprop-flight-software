@@ -20,7 +20,7 @@ enum DroneState {
 #[entry]
 fn main() -> ! {
     let board::Resources {
-        mut gpio2, 
+        mut gpio2,
         pins,
         lpuart6,
         mut gpt1,

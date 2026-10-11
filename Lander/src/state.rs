@@ -2,19 +2,13 @@ use ndarray::Array1;
 use nalgebra::{Vector3, UnitQuaternion};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ImuData {
-    pub accel: [f64; 3],
-    pub gyro: [f64; 3],
-    pub mag: [f64; 3],
-}
+/// IMU data in SI units and the Z-up body frame, from any IMU driver (see the `imu` crate).
+pub use imu::ImuSample;
 
-// TODO: Update the SensorData struct to be more representative of the data provided by the VN-200
-    // Bonus points if you can create an IMU abstraction to allow any IMU and it's data to be utilized
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SensorData {
     pub timestamp: f64,
-    pub imu_data: Option<ImuData>,
+    pub imu_data: Option<ImuSample>,
     pub gps_data: Option<[f64; 3]>,
     pub uwb_data: Option<[f64; 3]>,
     pub chamber_pressure: Option<f64>,

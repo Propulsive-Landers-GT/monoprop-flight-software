@@ -157,3 +157,8 @@ During flight, the computer writes real-time telemetry into `flight_log_*.mcap` 
     cargo run
     ```
 3.  **Commanding**: Type `arm` followed by `launch` in the terminal to takeoff.
+4.  **IMU degrees of freedom**: the placeholder IMU is 9-DOF (accelerometer, gyroscope, magnetometer) by default. Set `IMU_DOF=6` to drop the magnetometer; the navigator then skips its magnetometer update.
+    ```bash
+    IMU_DOF=6 cargo run           # bash
+    $env:IMU_DOF=6; cargo run     # PowerShell (stays set for the session; Remove-Item Env:IMU_DOF to clear)
+    ```

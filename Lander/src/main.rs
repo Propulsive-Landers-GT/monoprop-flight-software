@@ -2,6 +2,7 @@ use Lander::fsm::FlightStateMachine;
 use Lander::state::{self, SensorData};
 use Lander::mcap_logger::McapLogger;
 use Lander::telemetry::{self, GroundLink};
+use imu::{Imu, StaticImu};
 use std::sync::mpsc::{self, Receiver};
 
 fn spawn_stdin_channel() -> Receiver<String> {
@@ -80,6 +81,18 @@ fn ground_link_port() -> u16 {
         .unwrap_or(gs_protocol::DEFAULT_VEHICLE_PORT)
 }
 
+/// Placeholder IMU degrees of freedom from env `IMU_DOF`: 6 (accel + gyro) or 9 (+ magnetometer, default).
+fn placeholder_imu() -> StaticImu {
+    match std::env::var("IMU_DOF").ok().as_deref().map(str::trim) {
+        None | Some("") | Some("9") => StaticImu::level_at_rest(),
+        Some("6") => StaticImu::level_at_rest_6dof(),
+        Some(other) => {
+            println!("[Warning] IMU_DOF='{}' is not 6 or 9. Using 9-DOF.", other);
+            StaticImu::level_at_rest()
+        }
+    }
+}
+
 fn main() {
     configure_realtime_priority();
     println!("Lander Flight State Machine Starting...");
@@ -91,7 +104,12 @@ fn main() {
     let stdin_rx = spawn_stdin_channel();
     
     let clock = Clock::new();
-    
+
+    // Placeholder IMU until a hardware driver exists: a level vehicle at rest, with the EKF's world
+    // magnetic field [T] unless IMU_DOF=6. Any type implementing `imu::Imu` can replace it.
+    let mut imu_source = placeholder_imu();
+    println!("IMU: {}", imu_source.info().model);
+
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -138,16 +156,19 @@ fn main() {
         // Initialize sensor readings
         // TODO: Update sensor inits to either be more realistic or Nones until we start recieving to help gate bad starts
         //       Cannot guarantee what the data will look like on start and we shouldn't assume we'll always know
+        // A read error is reported and treated as missing IMU data, which the FSM's termination check handles.
+        let imu_data = match imu_source.read(mission_time) {
+            Ok(sample) => sample,
+            Err(e) => {
+                let msg = format!("IMU read failed: {:?}", e);
+                println!("{}", msg);
+                let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
+                None
+            }
+        };
         let sensor_data = SensorData {
             timestamp: mission_time,
-            imu_data: Some(state::ImuData {
-                accel: [0.0, 0.0, 9.81],
-                gyro: [0.0, 0.0, 0.0],
-                // Placeholder: the EKF's world magnetic field [T] as seen by a level vehicle. The previous
-                // unit-vector placeholder [-0.04, 0.44, -0.89] is ~1e4 x the field the magnetometer update
-                // expects and flipped the attitude estimate on the first step (instant tilt termination).
-                mag: [-2.0e-6, 22.0e-6, -44.3e-6],
-            }),
+            imu_data,
             gps_data: Some([0.0, 0.0, 0.0]),
             uwb_data: Some([0.0, 0.0, 0.0]),
             chamber_pressure: Some(15.0),
