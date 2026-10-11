@@ -13,3 +13,4 @@ nb = "1.0"
 teensy4-bsp = "0.5"
 postcard = "1.0"
 nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
+Estimation = { path = "../Estimation" }
