@@ -49,6 +49,8 @@ mod t_scenario_when_sensors_fail;
 mod t_interop;
 #[path = "unit/esekf_height.rs"]
 mod t_esekf_height;
+#[path = "unit/monoprop_inputs.rs"]
+mod t_monoprop_inputs;
 #[path = "unit/system.rs"]
 mod t_system;
 
@@ -101,6 +103,8 @@ fn main() {
     t_interop::run();
     support::section("esekf/height");
     t_esekf_height::run();
+    support::section("monoprop/inputs");
+    t_monoprop_inputs::run();
     support::section("system: the whole filter on simulated flights");
     t_system::run();
     support::finish();
