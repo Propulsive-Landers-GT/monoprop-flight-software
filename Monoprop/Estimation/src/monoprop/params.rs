@@ -74,6 +74,27 @@ pub const SIGMA_MAG: f64 = 0.02;
 /// Height standard deviation, m: the `sigma` of `update_height`.
 pub const SIGMA_HEIGHT: f64 = 0.05;
 
+// PLACEHOLDER(the existing height tests): the measured noise of the lidar's range.
+/// Lidar range standard deviation, m: the `sigma` of `update_lidar`.
+pub const SIGMA_LIDAR_RANGE: f64 = 0.05;
+
+// ---- lidar limits ----
+
+// PLACEHOLDER(VL53L1X: minimum accurate range 4 cm, per Pololu's datasheet summary; confirm against the
+// ST datasheet): the minimum range from the ST datasheet.
+/// Shortest lidar range that is used, m.
+pub const LIDAR_MIN_RANGE: f64 = 0.04;
+
+// PLACEHOLDER(VL53L1X reliable range, rough): the usable range measured on the vehicle, outdoors.
+// The usable range depends on the distance mode and the ambient light (short about 1.3 m, medium about
+// 3 m in the dark, long about 4 m), so set this from vehicle tests.
+/// Longest lidar range that is used, m.
+pub const LIDAR_MAX_RANGE: f64 = 3.0;
+
+// PLACEHOLDER(first guess): tune on the vehicle.
+/// Largest angle of the lidar beam from straight down that is used, rad: 30 deg * pi/180.
+pub const LIDAR_MAX_TILT: f64 = 30.0 * PI / 180.0;
+
 // ---- frames (assumptions) ----
 //
 // PLACEHOLDER(assumption): confirm against the vehicle drawings.
@@ -88,7 +109,6 @@ pub const SIGMA_HEIGHT: f64 = 0.05;
 // For each sensor: the rotation taking a vector from the sensor's own axes into the body frame, and the
 // sensor's position in the body frame (m). Functions, because nalgebra's identity and zeros are not `const`.
 //
-// TODO: the lidar beam direction in the body frame (needed to turn range into height); not known yet.
 // TODO: mounting of the second BMI323; not known yet.
 
 // PLACEHOLDER(no hardware yet): the measured mounting rotation of the reference IMU.
@@ -125,6 +145,25 @@ pub fn lidar_mount_rotation() -> M3 {
 /// Lidar position in the body frame, m.
 pub fn lidar_mount_offset() -> V3 {
     V3::zeros()
+}
+
+// PLACEHOLDER(assumption: the lidar points straight down): the measured beam direction.
+/// Lidar beam direction in the body frame (unit vector).
+pub fn lidar_beam_direction() -> V3 {
+    V3::new(0.0, 0.0, -1.0)
+}
+
+/// The lidar as mounted on the Monoprop, for `update_lidar`. `ground_z` is the ground height in the
+/// navigation frame (m): get it at start-up from `lidar_ground_z` with a reading taken on the pad.
+pub fn lidar_config(ground_z: f64) -> LidarConfig {
+    LidarConfig {
+        offset: lidar_mount_offset(),
+        beam: lidar_beam_direction(),
+        ground_z,
+        min_range: LIDAR_MIN_RANGE,
+        max_range: LIDAR_MAX_RANGE,
+        max_tilt: LIDAR_MAX_TILT,
+    }
 }
 
 // PLACEHOLDER(no hardware yet): the measured mounting rotation of the GNSS antenna.

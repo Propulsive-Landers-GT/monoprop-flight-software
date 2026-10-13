@@ -5,6 +5,7 @@
 //! - `update`: the generic gated update with injection and covariance reset
 //! - `sensors`: position (GPS / UWB) and magnetometer updates
 //! - `height`: height (barometer / downward lidar) updates
+//! - `lidar`: lidar range updates (distance along the beam, tilt handled by the model)
 
 mod filter;
 pub use filter::*;
@@ -16,3 +17,5 @@ mod sensors;
 pub use sensors::*;
 mod height;
 pub use height::*;
+mod lidar;
+pub use lidar::*;
