@@ -173,7 +173,7 @@ pub fn gnss_mount_rotation() -> M3 {
 }
 
 // PLACEHOLDER(no hardware yet): the measured position of the GNSS antenna.
-/// GNSS antenna position in the body frame, m.
+/// GNSS antenna position in the body frame, m: the `antenna_offset` of `update_gps_offset`.
 pub fn gnss_mount_offset() -> V3 {
     V3::zeros()
 }

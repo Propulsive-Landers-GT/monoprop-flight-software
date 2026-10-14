@@ -105,10 +105,10 @@ impl LidarSample {
     }
 }
 
-/// One GNSS position fix, for Esekf::update_gps.
+/// One GNSS position fix, for Esekf::update_gps_offset or Esekf::update_gps.
 ///
-/// update_gps currently takes a single sigma for all three axes, so callers should pass the largest
-/// of the three components of sigma for now.
+/// update_gps_offset takes the three components of sigma as they are. update_gps takes a single sigma
+/// for all three axes, so callers of that one should pass the largest of the three.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GnssSample {
     /// Time of the fix (microseconds, shared clock).

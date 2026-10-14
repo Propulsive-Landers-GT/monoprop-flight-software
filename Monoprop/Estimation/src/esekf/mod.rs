@@ -6,6 +6,7 @@
 //! - `sensors`: position (GPS / UWB) and magnetometer updates
 //! - `height`: height (barometer / downward lidar) updates
 //! - `lidar`: lidar range updates (distance along the beam, tilt handled by the model)
+//! - `gps_offset`: position (GPS) updates with an antenna offset and a sigma per axis
 
 mod filter;
 pub use filter::*;
@@ -19,3 +20,5 @@ mod height;
 pub use height::*;
 mod lidar;
 pub use lidar::*;
+mod gps_offset;
+pub use gps_offset::*;

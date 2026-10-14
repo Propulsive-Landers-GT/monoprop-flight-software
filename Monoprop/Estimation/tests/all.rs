@@ -51,6 +51,8 @@ mod t_interop;
 mod t_esekf_height;
 #[path = "unit/esekf_lidar.rs"]
 mod t_esekf_lidar;
+#[path = "unit/esekf_gps_offset.rs"]
+mod t_esekf_gps_offset;
 #[path = "unit/monoprop_inputs.rs"]
 mod t_monoprop_inputs;
 #[path = "unit/system.rs"]
@@ -107,6 +109,8 @@ fn main() {
     t_esekf_height::run();
     support::section("esekf/lidar");
     t_esekf_lidar::run();
+    support::section("esekf/gps_offset");
+    t_esekf_gps_offset::run();
     support::section("monoprop/inputs");
     t_monoprop_inputs::run();
     support::section("system: the whole filter on simulated flights");
