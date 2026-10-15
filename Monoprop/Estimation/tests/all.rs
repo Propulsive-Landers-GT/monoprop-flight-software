@@ -53,6 +53,8 @@ mod t_esekf_height;
 mod t_esekf_lidar;
 #[path = "unit/esekf_gps_offset.rs"]
 mod t_esekf_gps_offset;
+#[path = "unit/esekf_stationary.rs"]
+mod t_esekf_stationary;
 #[path = "unit/monoprop_inputs.rs"]
 mod t_monoprop_inputs;
 #[path = "unit/monoprop_imu_pair.rs"]
@@ -113,6 +115,8 @@ fn main() {
     t_esekf_lidar::run();
     support::section("esekf/gps_offset");
     t_esekf_gps_offset::run();
+    support::section("esekf/stationary");
+    t_esekf_stationary::run();
     support::section("monoprop/inputs");
     t_monoprop_inputs::run();
     support::section("monoprop/imu_pair");

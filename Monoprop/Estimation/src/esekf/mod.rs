@@ -7,6 +7,7 @@
 //! - `height`: height (barometer / downward lidar) updates
 //! - `lidar`: lidar range updates (distance along the beam, tilt handled by the model)
 //! - `gps_offset`: position (GPS) updates with an antenna offset and a sigma per axis
+//! - `stationary`: zero-velocity and zero angular-rate updates while standing still (on the pad)
 
 mod filter;
 pub use filter::*;
@@ -22,3 +23,5 @@ mod lidar;
 pub use lidar::*;
 mod gps_offset;
 pub use gps_offset::*;
+mod stationary;
+pub use stationary::*;

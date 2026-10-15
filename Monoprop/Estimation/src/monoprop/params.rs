@@ -85,6 +85,20 @@ pub const SIGMA_HEIGHT: f64 = 0.05;
 /// Lidar range standard deviation, m: the `sigma` of `update_lidar`.
 pub const SIGMA_LIDAR_RANGE: f64 = 0.05;
 
+// PLACEHOLDER(team choice, typical for a vehicle standing on the ground): how still the pad really is.
+// TODO: set this from a recording on the pad (vibration, wind, tether).
+/// Zero-velocity standard deviation per axis while on the pad, m/s: the `sigma` of `update_zero_velocity`.
+pub const SIGMA_ZERO_VELOCITY: f64 = 0.02;
+
+// PLACEHOLDER(derived from the BMI323 datasheet noise density and the IMU_RATE_HZ placeholder): the gyro's
+// own per-sample noise (about 2.4e-3 rad/s at 400 Hz).
+// TODO: confirm from a still recording on the pad.
+/// Zero angular-rate standard deviation per axis while on the pad, rad/s: the `sigma` of `update_zero_rate`.
+/// A function, because sqrt is not available in a const.
+pub fn sigma_zero_rate() -> f64 {
+    per_sample_sigma(bmi323::GYRO_NOISE_DENSITY, IMU_RATE_HZ)
+}
+
 // ---- lidar limits ----
 
 // PLACEHOLDER(VL53L1X: minimum accurate range 4 cm, per Pololu's datasheet summary; confirm against the
