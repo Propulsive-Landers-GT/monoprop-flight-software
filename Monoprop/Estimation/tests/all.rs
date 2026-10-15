@@ -55,6 +55,8 @@ mod t_esekf_lidar;
 mod t_esekf_gps_offset;
 #[path = "unit/monoprop_inputs.rs"]
 mod t_monoprop_inputs;
+#[path = "unit/monoprop_imu_pair.rs"]
+mod t_monoprop_imu_pair;
 #[path = "unit/system.rs"]
 mod t_system;
 
@@ -113,6 +115,8 @@ fn main() {
     t_esekf_gps_offset::run();
     support::section("monoprop/inputs");
     t_monoprop_inputs::run();
+    support::section("monoprop/imu_pair");
+    t_monoprop_imu_pair::run();
     support::section("system: the whole filter on simulated flights");
     t_system::run();
     support::finish();

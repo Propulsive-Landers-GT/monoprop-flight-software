@@ -4,6 +4,7 @@
 //! - DATASHEET(BMI323): a value from the Bosch BMI323 datasheet (typical, high-performance mode).
 //! - PLACEHOLDER(source): a stand-in, with where it came from and what should replace it.
 use crate::*;
+use super::{ImuId, ImuPairConfig};
 
 // ---- unit conversion ----
 
@@ -48,6 +49,12 @@ pub mod bmi323 {
 // PLACEHOLDER(no hardware yet): the output data rate the BMI323 is actually configured for.
 /// IMU sample rate, Hz.
 pub const IMU_RATE_HZ: f64 = 400.0;
+
+// PLACEHOLDER(derived from the IMU_RATE_HZ placeholder): half the IMU sample period, so two samples
+// closer than that belong to the same tick (400 Hz: 1250 us).
+// TODO: set this from how the two BMI323s are actually triggered.
+/// Largest timestamp difference of an IMU pair that is combined, microseconds.
+pub const IMU_PAIR_MAX_SKEW_US: u64 = 1_000_000 / (2 * IMU_RATE_HZ as u64);
 
 /// The BMI323 sampled at `rate_hz`, built the same way as `ImuSpec::vn200`.
 pub fn bmi323_spec(rate_hz: f64) -> ImuSpec {
@@ -100,7 +107,7 @@ pub const LIDAR_MAX_TILT: f64 = 30.0 * PI / 180.0;
 // PLACEHOLDER(assumption): confirm against the vehicle drawings.
 // Body frame: x forward, y left, z up (right-handed), origin at the reference IMU.
 // Reference IMU: the BMI323. The vehicle has two; one of the two also carries the magnetometer.
-// TODO: which of the two BMI323s is the reference.
+// Which of the two BMI323s is the reference: REFERENCE_IMU below.
 //
 // Magnetic reference: use `mag_reference()` from env.rs (set it for the test site there).
 
@@ -109,18 +116,45 @@ pub const LIDAR_MAX_TILT: f64 = 30.0 * PI / 180.0;
 // For each sensor: the rotation taking a vector from the sensor's own axes into the body frame, and the
 // sensor's position in the body frame (m). Functions, because nalgebra's identity and zeros are not `const`.
 //
-// TODO: mounting of the second BMI323; not known yet.
 
-// PLACEHOLDER(no hardware yet): the measured mounting rotation of the reference IMU.
-/// Reference IMU axes -> body frame.
+// PLACEHOLDER(no hardware yet): which BMI323 is the reference.
+/// The IMU the combined IMU sample (and so the filter) is expressed at.
+pub const REFERENCE_IMU: ImuId = ImuId::A;
+
+// PLACEHOLDER(no hardware yet): the measured mounting rotation of IMU A.
+/// IMU A axes -> body frame.
 pub fn imu_mount_rotation() -> M3 {
     M3::identity()
 }
 
-// PLACEHOLDER(no hardware yet): the measured position of the reference IMU.
-/// Reference IMU position in the body frame, m.
+// PLACEHOLDER(no hardware yet): the measured position of IMU A.
+/// IMU A position in the body frame, m.
 pub fn imu_mount_offset() -> V3 {
     V3::zeros()
+}
+
+// PLACEHOLDER(no hardware yet): the measured mounting rotation of IMU B.
+/// IMU B axes -> body frame.
+pub fn imu_b_mount_rotation() -> M3 {
+    M3::identity()
+}
+
+// PLACEHOLDER(no hardware yet): the measured position of IMU B.
+/// IMU B position in the body frame, m.
+pub fn imu_b_mount_offset() -> V3 {
+    V3::zeros()
+}
+
+/// The two IMUs as mounted on the Monoprop, for `combine_imus`.
+pub fn imu_pair_config() -> ImuPairConfig {
+    ImuPairConfig {
+        reference: REFERENCE_IMU,
+        a_rotation: imu_mount_rotation(),
+        a_offset: imu_mount_offset(),
+        b_rotation: imu_b_mount_rotation(),
+        b_offset: imu_b_mount_offset(),
+        max_skew_us: IMU_PAIR_MAX_SKEW_US,
+    }
 }
 
 // PLACEHOLDER(no hardware yet): the measured mounting rotation of the magnetometer.
