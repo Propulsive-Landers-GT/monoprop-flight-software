@@ -140,4 +140,87 @@ pub fn run() {
         let Some(a) = reading(0, &M3::identity(), &zero, &w, &zero, &f_ref) else { return };
         assert!(mp::combine_imus(Some(&a), Some(&a), &c).is_some(), "combines");
     });
+    test("pair difference: zero until the minimum count, then the bias difference", || {
+        let (ba, bb) = (V3::new(0.03, -0.07, 0.15), V3::new(-0.02, 0.0, -0.05));
+        let (ga, gb) = (V3::new(-0.004, 0.003, 0.009), V3::new(0.001, -0.005, -0.001));
+        let rb = rot(V3::new(0.0, 0.0, FRAC_PI_2));
+        let c = mp::ImuPairConfig { b_rotation: rb, ..cfg(mp::ImuId::A, M3::identity(), V3::new(0.05, 0.02, 0.0)) };
+        let mut d = mp::PairDifference::new();
+        // a still vehicle: A reads f_ref + bA, B (mounted rotated) reads rb^T f_ref + bB in its own axes
+        let a = mp::ImuSample::new(0, f_ref + ba, w + ga);
+        let b = mp::ImuSample::new(0, rb.transpose() * f_ref + bb, rb.transpose() * w + gb);
+        assert!(a.is_some() && b.is_some());
+        let (Some(a), Some(b)) = (a, b) else { return };
+        // the vehicle spins at w, so B's reading includes the centripetal term at its offset
+        let d_off = V3::new(0.05, 0.02, 0.0);
+        let b = mp::ImuSample::new(0, b.accel() + rb.transpose() * w.cross(&w.cross(&d_off)), b.gyro());
+        let Some(b) = b else { return };
+        for _ in 0..399 {
+            d.update(&a, &b, &c, 4000);
+        }
+        let one = mp::combine_imus(Some(&a), None, &c);
+        assert!(one.is_some(), "single sample");
+        let Some(one) = one else { return };
+        assert_eq!(d.correct(&one, &c, 400), one, "399 pairs: no correction yet");
+        d.update(&a, &b, &c, 4000);
+        assert_eq!(d.count(), 400);
+        // B is moved to the reference point with the MEASURED mean rate, which includes the gyro biases, so
+        // the learned difference also holds the (tiny) centripetal term of that bias; expected exactly:
+        let w_meas = (w + ga + (w + rb * gb)) * 0.5;
+        let centripetal = |w: &V3| w.cross(&w.cross(&d_off));
+        let expected = ba - rb * bb - centripetal(&w) + centripetal(&w_meas);
+        assert!((d.accel() - expected).amax() < 1e-12, "accel difference, body frame");
+        assert!((expected - (ba - rb * bb)).amax() < 1e-3, "that bias term is small");
+        assert!((d.gyro() - (ga - rb * gb)).amax() < 1e-12, "gyro difference, body frame");
+        let late = mp::ImuSample::new(5000, a.accel(), a.gyro());
+        let Some(late) = late else { return };
+        d.update(&late, &b, &c, 4000);
+        assert_eq!(d.count(), 400, "a pair out of sync is ignored");
+    });
+    test("pair difference: a single IMU's corrected sample equals the combined one, either IMU, either reference", || {
+        let (ba, bb) = (V3::new(0.03, -0.07, 0.15), V3::new(-0.02, 0.0, -0.05));
+        let (ga, gb) = (V3::new(-0.004, 0.003, 0.009), V3::new(0.001, -0.005, -0.001));
+        for reference in [mp::ImuId::A, mp::ImuId::B] {
+            let c = cfg(reference, M3::identity(), zero);
+            let a = mp::ImuSample::new(0, f_ref + ba, w + ga);
+            let b = mp::ImuSample::new(0, f_ref + bb, w + gb);
+            assert!(a.is_some() && b.is_some(), "valid samples");
+            let (Some(a), Some(b)) = (a, b) else { return };
+            let mut d = mp::PairDifference::new();
+            for _ in 0..400 {
+                d.update(&a, &b, &c, 4000);
+            }
+            let both = mp::combine_imus(Some(&a), Some(&b), &c);
+            let only_a = mp::combine_imus(Some(&a), None, &c).map(|s| d.correct(&s, &c, 400));
+            let only_b = mp::combine_imus(None, Some(&b), &c).map(|s| d.correct(&s, &c, 400));
+            assert!(both.is_some() && only_a.is_some() && only_b.is_some(), "samples");
+            let (Some(both), Some(only_a), Some(only_b)) = (both, only_a, only_b) else { return };
+            for (name, s) in [("A only", only_a), ("B only", only_b)] {
+                assert!((s.sample.accel() - both.sample.accel()).amax() < 1e-12, "{} accel, reference {:?}", name, reference);
+                assert!((s.sample.gyro() - both.sample.gyro()).amax() < 1e-12, "{} gyro, reference {:?}", name, reference);
+            }
+            assert_eq!(d.correct(&both, &c, 400), both, "a combined sample is not changed");
+        }
+    });
+    test("pair difference: A -> B -> Both -> A without a jump", || {
+        let (ba, bb) = (V3::new(0.03, -0.07, 0.15), V3::new(-0.02, 0.0, -0.05));
+        let c = cfg(mp::ImuId::A, M3::identity(), zero);
+        let a = mp::ImuSample::new(0, f_ref + ba, w);
+        let b = mp::ImuSample::new(0, f_ref + bb, w);
+        assert!(a.is_some() && b.is_some(), "valid samples");
+        let (Some(a), Some(b)) = (a, b) else { return };
+        let mut d = mp::PairDifference::new();
+        for _ in 0..400 {
+            d.update(&a, &b, &c, 4000);
+        }
+        let mut seen: Option<V3> = None;
+        for (ua, ub) in [(true, false), (false, true), (true, true), (true, false)] {
+            let (sa, sb) = (if ua { Some(&a) } else { None }, if ub { Some(&b) } else { None });
+            let s = mp::combine_imus(sa, sb, &c).map(|s| d.correct(&s, &c, 400));
+            assert!(s.is_some(), "sample");
+            let Some(s) = s else { return };
+            let first = *seen.get_or_insert(s.sample.accel());
+            assert!((s.sample.accel() - first).amax() < 1e-12, "jump at {:?}", s.status);
+        }
+    });
 }

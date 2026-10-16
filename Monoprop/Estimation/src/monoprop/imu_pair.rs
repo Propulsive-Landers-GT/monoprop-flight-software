@@ -104,3 +104,91 @@ pub fn combine_imus(a: Option<&ImuSample>, b: Option<&ImuSample>, cfg: &ImuPairC
     };
     ImuSample::new(t_us, accel, gyro).map(|sample| CombinedImu { sample, status })
 }
+
+/// Learned difference between the two IMUs' readings (reference minus other, body frame, the other moved to
+/// the reference point), used to keep the combined sample's bias continuous when one IMU drops out.
+///
+/// While both IMUs are combined, the combined sample carries the MEAN of their biases. Using one IMU alone
+/// would make that bias jump by half their difference; `correct` removes that step, so a single-IMU sample
+/// carries the same mean bias as a combined one. This corrects the bias DIFFERENCE, not the biases
+/// themselves (the filter still estimates the mean bias). The difference is a slow running average
+/// (cumulative mean for the first `window` pairs, then exponential with weight 1/window), so if it drifts
+/// the correction lags by about `window` pairs; the uncorrected tangential term (alpha x d) and the noise
+/// average into it only slightly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PairDifference {
+    accel: V3, // m/s^2
+    gyro: V3,  // rad/s
+    count: u32,
+}
+
+impl Default for PairDifference {
+    fn default() -> Self {
+        PairDifference::new()
+    }
+}
+
+impl PairDifference {
+    pub fn new() -> Self {
+        PairDifference { accel: V3::zeros(), gyro: V3::zeros(), count: 0 }
+    }
+
+    /// Learn from one pair of samples. Only pairs that are both present and in sync (within
+    /// `cfg.max_skew_us`) count; anything else, or a non-finite configuration, is ignored.
+    pub fn update(&mut self, a: &ImuSample, b: &ImuSample, cfg: &ImuPairConfig, window: u32) {
+        if !(finite33(&cfg.a_rotation) && finite33(&cfg.b_rotation) && finite3(&cfg.a_offset) && finite3(&cfg.b_offset)) {
+            return;
+        }
+        if a.t_us().abs_diff(b.t_us()) > cfg.max_skew_us {
+            return;
+        }
+        let (r, rr, ro, o, or, oo) = match cfg.reference {
+            ImuId::A => (a, cfg.a_rotation, cfg.a_offset, b, cfg.b_rotation, cfg.b_offset),
+            ImuId::B => (b, cfg.b_rotation, cfg.b_offset, a, cfg.a_rotation, cfg.a_offset),
+        };
+        let (wr, wo) = (rr * r.gyro(), or * o.gyro());
+        let w = (wr + wo) * 0.5;
+        // the same centripetal correction combine_imus applies to the other IMU
+        let da = rr * r.accel() - (or * o.accel() - centripetal(&w, &(oo - ro)));
+        let dg = wr - wo;
+        if !(finite3(&da) && finite3(&dg)) {
+            return;
+        }
+        self.count = self.count.saturating_add(1);
+        let k = 1.0 / f64::from(self.count.min(window.max(1)));
+        self.accel += (da - self.accel) * k;
+        self.gyro += (dg - self.gyro) * k;
+    }
+
+    /// Pairs learned from so far.
+    pub fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Learned accelerometer difference, reference minus other (m/s^2, body frame).
+    pub fn accel(&self) -> V3 {
+        self.accel
+    }
+
+    /// Learned gyro difference, reference minus other (rad/s, body frame).
+    pub fn gyro(&self) -> V3 {
+        self.gyro
+    }
+
+    /// The combined sample with the bias step of a single-IMU sample removed: the reference alone gets
+    /// minus half the difference, the other alone plus half (the mean is reference - d/2 = other + d/2).
+    /// A combined (Both) sample, or fewer than `min_pairs` learned pairs, is returned unchanged.
+    pub fn correct(&self, c: &CombinedImu, cfg: &ImuPairConfig, min_pairs: u32) -> CombinedImu {
+        if self.count < min_pairs {
+            return *c;
+        }
+        let sign = match c.status {
+            ImuPairStatus::Both => return *c,
+            ImuPairStatus::Single { used, .. } => if used == cfg.reference { -0.5 } else { 0.5 },
+        };
+        let s = c.sample;
+        ImuSample::new(s.t_us(), s.accel() + self.accel * sign, s.gyro() + self.gyro * sign)
+            .map(|sample| CombinedImu { sample, status: c.status })
+            .unwrap_or(*c)
+    }
+}

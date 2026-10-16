@@ -3,7 +3,7 @@
 //!
 //! Start-up: Waiting (collect still IMU and mag readings) -> OnPad (filter started; LiDAR
 //! ground height from `imu_height_above_pad`, refined by the mean of the first valid pad
-//! readings) -> Flying (first loop with `armed`). On the pad, zero-velocity and zero-rate
+//! readings, each taken at home, height 0) -> Flying (first loop with `armed`). On the pad, zero-velocity and zero-rate
 //! updates run at a reduced rate, and stop as soon as `armed` is set, not at lift-off.
 //!
 //! Launch rule: the main loop must not allow launch (set `armed`) until the status is
@@ -12,13 +12,15 @@
 //!
 //! Time: everything runs on the reference IMU's clock. A sample from the other IMU alone
 //! is shifted by the offset between the two clocks, learned while both are combined (zero
-//! until the first combined pair), so switching IMUs keeps dt even.
+//! until the first combined pair), so switching IMUs keeps dt even. A sample from one IMU alone
+//! is also corrected by half the learned A-B reading difference (see PairDifference), so its
+//! bias matches that of a combined sample.
 //!
 //! Rules: no IMU sample means no prediction; each sensor sample is used only if newer
 //! than the last one used; every outcome is counted as accepted (fused), rejected
 //! (refused by the filter, or a bad timestamp) or skipped (couldn't apply).
 use crate::*;
-use super::{combine_imus, GnssSample, ImuId, ImuPairConfig, ImuPairStatus, ImuSample, LidarSample, MagSample, StillnessWindow};
+use super::{combine_imus, GnssSample, ImuId, ImuPairConfig, ImuPairStatus, ImuSample, LidarSample, MagSample, PairDifference, StillnessWindow};
 
 /// Everything the navigator needs to know: built from the Monoprop parameters by `navigator_config()`.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +43,9 @@ pub struct NavConfig {
     pub still_gyro_max: f64,        // rad/s
     pub imu_height_above_pad: f64,  // m: the pad surface is this far below home (the IMU at alignment)
     pub lidar_ground_samples: u32,  // valid pad readings averaged for the ground height
+    pub lidar_pad_truncation_max: f64, // largest share of pad readings below the floor for the average to be used
+    pub imu_diff_window: u32,       // pairs in the running average of the A-B difference
+    pub imu_diff_min_pairs: u32,    // pairs needed before single-IMU samples are corrected
 }
 
 /// One loop's new samples (None: nothing new from that sensor) and the main loop's armed flag.
@@ -87,6 +92,7 @@ pub struct NavStatus {
     pub startup: StartupState,
     pub imu_pair: Option<ImuPairStatus>, // of the last IMU sample used
     pub lidar_ground_measured: bool, // false: ground from imu_height_above_pad; true: mean of pad readings
+    pub lidar_ground_truncated: bool, // the fallback was kept: too many pad readings below the lidar's floor
     pub counts: NavCounts,
 }
 
@@ -114,7 +120,11 @@ pub struct Navigator {
     lidar_ground_measured: bool,
     ground_sum: f64, // ground heights from valid pad readings, not yet applied
     ground_count: u32,
+    pad_below_min: u32,   // pad readings below the lidar's minimum range while averaging
+    ground_decided: bool, // the pad average was applied, or rejected for truncation
+    lidar_ground_truncated: bool,
     pair_offset_us: i64, // other IMU's clock minus the reference's, from the last combined pair
+    pair_diff: PairDifference, // A-B reading difference, keeps the bias continuous when one IMU drops
     window: StillnessWindow,
     last_imu_t: Option<u64>,
     last_gyro: V3, // last combined gyro reading used (body frame)
@@ -173,7 +183,11 @@ impl Navigator {
             lidar_ground_measured: false,
             ground_sum: 0.0,
             ground_count: 0,
+            pad_below_min: 0,
+            ground_decided: false,
+            lidar_ground_truncated: false,
             pair_offset_us: 0,
+            pair_diff: PairDifference::new(),
             window: StillnessWindow::new(),
             last_imu_t: None,
             last_gyro: V3::zeros(),
@@ -197,6 +211,7 @@ impl Navigator {
                     // too few pad readings for a ground height: keep the fallback for the flight
                     self.ground_sum = 0.0;
                     self.ground_count = 0;
+                    self.pad_below_min = 0;
                 }
                 StartupState::Waiting => self.window.clear(), // a running motor is not "still"
                 StartupState::Flying => {}
@@ -231,6 +246,13 @@ impl Navigator {
             bump(&mut self.counts.imu.rejected);
             return;
         };
+        // learn the A-B difference from combined pairs, and remove the bias step from single-IMU samples
+        if c.status == ImuPairStatus::Both {
+            if let (Some(a), Some(b)) = (inputs.imu_a.as_ref(), inputs.imu_b.as_ref()) {
+                self.pair_diff.update(a, b, &self.cfg.imu_pair, self.cfg.imu_diff_window);
+            }
+        }
+        let c = self.pair_diff.correct(&c, &self.cfg.imu_pair, self.cfg.imu_diff_min_pairs);
         let reference = self.cfg.imu_pair.reference;
         if c.status == ImuPairStatus::Both {
             let (r, o) = match reference {
@@ -306,8 +328,11 @@ impl Navigator {
             self.startup = StartupState::OnPad;
             self.lidar.ground_z = -c.imu_height_above_pad; // until pad readings refine it
             self.lidar_ground_measured = false;
+            self.lidar_ground_truncated = false;
+            self.ground_decided = false;
             self.ground_sum = 0.0;
             self.ground_count = 0;
+            self.pad_below_min = 0;
             self.last_gyro = *gyro;
             self.last_stationary_t = t;
             self.pad_gyro_sum = V3::zeros();
@@ -366,23 +391,43 @@ impl Navigator {
             return;
         };
         let range = s.range();
-        if self.startup == StartupState::OnPad && !self.lidar_ground_measured {
-            // on the pad: average the first valid readings into the ground height (the fallback is
-            // used meanwhile); readings the lidar can't give here (e.g. below its minimum) are skipped
-            match lidar_ground_z(&f.x, range, &self.lidar) {
+        if self.startup == StartupState::OnPad && !self.ground_decided {
+            // On the pad: average the first valid readings into the ground height (the fallback is used
+            // meanwhile). Each is taken at home (height 0): the vehicle hasn't moved since alignment, so
+            // home is exact, while the filter's own height may already have been moved by e.g. a GNSS
+            // fix; the tilt comes from the filter's attitude.
+            // Readings below the minimum range are skipped but counted: if the pad is close to the
+            // lidar's floor, the low side of its noise is cut off and the average of what is left is
+            // biased high, so the average is then not used (see lidar_pad_truncation_max).
+            if range < self.lidar.min_range {
+                self.pad_below_min = self.pad_below_min.saturating_add(1);
+                bump(&mut self.counts.lidar.skipped);
+                return;
+            }
+            let at_home = Nominal { p: V3::zeros(), ..f.x };
+            match lidar_ground_z(&at_home, range, &self.lidar) {
                 Some(g) => {
                     self.ground_sum += g;
                     self.ground_count = self.ground_count.saturating_add(1);
                     bump(&mut self.counts.lidar.accepted);
                     if self.ground_count >= self.cfg.lidar_ground_samples.max(1) {
-                        self.lidar.ground_z = self.ground_sum / f64::from(self.ground_count);
-                        self.lidar_ground_measured = true;
+                        let total = f64::from(self.ground_count) + f64::from(self.pad_below_min);
+                        let share_below = f64::from(self.pad_below_min) / total;
+                        if share_below > self.cfg.lidar_pad_truncation_max {
+                            self.lidar_ground_truncated = true; // keep the fallback
+                        } else {
+                            self.lidar.ground_z = self.ground_sum / f64::from(self.ground_count);
+                            self.lidar_ground_measured = true;
+                        }
+                        self.ground_decided = true;
                     }
                 }
                 None => bump(&mut self.counts.lidar.skipped),
             }
             return;
         }
+        // TODO: include the ground height's own uncertainty (sigma^2 / N for an average of N pad readings)
+        // in the lidar measurement noise; today the ground is treated as exact.
         let in_range = range >= self.lidar.min_range && range <= self.lidar.max_range;
         if !in_range || lidar_prediction(&f.x, &self.lidar).is_none() {
             bump(&mut self.counts.lidar.skipped);
@@ -415,13 +460,18 @@ impl Navigator {
         })
     }
 
+    /// The filter itself (read-only), for diagnostics such as consistency checks; None until aligned.
+    pub fn filter(&self) -> Option<&Esekf> {
+        self.filter.as_ref()
+    }
+
     /// Height of the ground in the navigation frame used by the lidar update (m); None until aligned.
     pub fn ground_z(&self) -> Option<f64> {
         self.filter.as_ref().map(|_| self.lidar.ground_z)
     }
 
     pub fn status(&self) -> NavStatus {
-        NavStatus { startup: self.startup, imu_pair: self.imu_pair, lidar_ground_measured: self.lidar_ground_measured, counts: self.counts }
+        NavStatus { startup: self.startup, imu_pair: self.imu_pair, lidar_ground_measured: self.lidar_ground_measured, lidar_ground_truncated: self.lidar_ground_truncated, counts: self.counts }
     }
 
     /// Position (m, navigation frame) for telemetry; None until aligned.

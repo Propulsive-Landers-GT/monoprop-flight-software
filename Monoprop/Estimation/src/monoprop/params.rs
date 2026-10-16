@@ -74,10 +74,14 @@ pub fn bmi323_spec(rate_hz: f64) -> ImuSpec {
 pub const SIGMA_POS: f64 = 0.5;
 
 // PLACEHOLDER: the measured noise of the calibrated magnetometer's direction.
+// It is the main driver of the yaw error (in simulation the attitude-error peaks are nearly all yaw).
+// TODO: measure it on the real magnetometer with the motor running (the motor and valves disturb the field).
 /// Magnetometer direction standard deviation per axis (unit vector, so unitless): the `sigma` of `update_mag`.
 pub const SIGMA_MAG: f64 = 0.02;
 
-// PLACEHOLDER(the existing height tests): the measured noise of the lidar's range.
+// PLACEHOLDER(conservative, from the existing height tests): probably far larger than the VL53L1X's noise
+// at short range. TODO: set from the ST datasheet or bench data; it depends on the distance mode, the
+// ambient light and the target.
 /// Lidar range standard deviation, m: the `sigma` of `update_lidar`.
 pub const SIGMA_LIDAR_RANGE: f64 = 0.05;
 
@@ -272,12 +276,32 @@ pub const MAX_IMU_GAP_US: u64 = MAX_IMU_GAP_PERIODS * 1_000_000 / IMU_RATE_HZ as
 
 // PLACEHOLDER(no hardware yet: the IMU sits on the pad until the drawings give its height).
 // TODO: set from the vehicle drawings (reference IMU above the pad surface).
+// Accuracy matters when the lidar can't read on the pad: the fallback is then used for the whole flight,
+// and a wrong value gives a persistent vertical bias the filter can't see (simulated: 5 cm wrong gave a
+// vertical NEES of 37 instead of about 1).
 /// Height of the reference IMU above the pad surface, m: the lidar's ground height until pad readings refine it.
 pub const IMU_HEIGHT_ABOVE_PAD: f64 = 0.0;
 
-// PLACEHOLDER(choice): enough readings to average out the lidar's noise on the pad.
+// PLACEHOLDER(choice): enough readings to average out the lidar's noise on the pad (1 s at 50 Hz). The
+// filter treats the averaged ground as exact, so its error (lidar sigma / sqrt(N)) shows up as a vertical
+// bias: in simulation 10 readings gave a vertical NEES of 3 to 17, 50 readings about 1 to 2.
+// TODO: include the averaged ground's variance (sigma^2 / N) in the lidar measurement noise.
 /// Valid lidar readings on the pad averaged into the ground height.
-pub const LIDAR_GROUND_SAMPLES: u32 = 10;
+pub const LIDAR_GROUND_SAMPLES: u32 = 50;
+
+// PLACEHOLDER(choice): when the pad is close to the lidar's minimum range, readings below it are skipped and
+// the average of the rest is biased high; above this share of pad readings below the floor, the average is
+// not used and the fallback (IMU_HEIGHT_ABOVE_PAD) is kept.
+/// Largest share of pad readings below the lidar's minimum range for the pad average to be used.
+pub const LIDAR_PAD_TRUNCATION_MAX: f64 = 0.05;
+
+// PLACEHOLDER(choice: 10 s at the IMU_RATE_HZ placeholder): how slowly the A-B difference is followed.
+/// IMU pairs in the running average of the A-B reading difference.
+pub const IMU_DIFF_WINDOW: u32 = 4000;
+
+// PLACEHOLDER(choice: 1 s at the IMU_RATE_HZ placeholder).
+/// IMU pairs needed before single-IMU samples are corrected by the learned difference.
+pub const IMU_DIFF_MIN_PAIRS: u32 = 400;
 
 /// The navigator as set up for the Monoprop.
 pub fn navigator_config() -> NavConfig {
@@ -300,5 +324,8 @@ pub fn navigator_config() -> NavConfig {
         still_gyro_max: still_gyro_max(),
         imu_height_above_pad: IMU_HEIGHT_ABOVE_PAD,
         lidar_ground_samples: LIDAR_GROUND_SAMPLES,
+        lidar_pad_truncation_max: LIDAR_PAD_TRUNCATION_MAX,
+        imu_diff_window: IMU_DIFF_WINDOW,
+        imu_diff_min_pairs: IMU_DIFF_MIN_PAIRS,
     }
 }

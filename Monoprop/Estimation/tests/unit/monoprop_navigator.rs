@@ -78,12 +78,12 @@ pub fn run() {
         assert!(out.estimate.is_some(), "estimate after alignment");
         let Some(e) = out.estimate else { return };
         assert!(e.position.norm() < 1e-9 && boxminus(&e.attitude, &Quat::identity()).norm() < 1e-9, "level, at home");
-        let out = drive(&mut nav, &pad, 400, 480, false); // 10 lidar readings
+        let out = drive(&mut nav, &pad, 400, 800, false); // 50 lidar readings
         assert_eq!(out.status.startup, mp::StartupState::OnPad);
         assert!(out.status.lidar_ground_measured, "ground from the pad readings");
-        let out = drive(&mut nav, &pad, 480, 481, true);
+        let out = drive(&mut nav, &pad, 800, 801, true);
         assert_eq!(out.status.startup, mp::StartupState::Flying, "armed");
-        let out = drive(&mut nav, &pad, 481, 482, false);
+        let out = drive(&mut nav, &pad, 801, 802, false);
         assert_eq!(out.status.startup, mp::StartupState::Flying, "one-way");
     });
     test("a moving sample restarts the window, and armed prevents alignment", || {
@@ -260,22 +260,23 @@ pub fn run() {
         let z1 = out.estimate.map(|e| e.position.z).unwrap_or(f64::NAN);
         assert!(z1 > z0 + 0.01, "height moved up towards 0.10 m: {} -> {}", z0, z1);
     });
-    test("pad readings refine the fallback once 10 have been collected", || {
+    test("pad readings refine the fallback once LIDAR_GROUND_SAMPLES (50) have been collected", || {
         let pad = Pad { pad_range: 0.30, ..Pad::new() };
         let cfg = mp::NavConfig { imu_height_above_pad: 0.05, ..mp::navigator_config() };
         let mut nav = mp::Navigator::new(cfg);
         drive(&mut nav, &pad, 0, 400, false);
         let mut readings = 0;
-        for k in 400..520 {
+        for k in 400..820 {
             let out = nav.step(&pad.inputs(k, false));
             if k.is_multiple_of(8) {
                 readings += 1;
-                assert_eq!(out.status.lidar_ground_measured, readings >= 10, "after {} readings", readings);
+                assert_eq!(out.status.lidar_ground_measured, readings >= mp::LIDAR_GROUND_SAMPLES, "after {} readings", readings);
             }
         }
         let ground = nav.ground_z().unwrap_or(f64::NAN);
         let z = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
         assert_close(z - ground, 0.30, 1e-3, "predicted range on the pad");
+        assert!(!nav.status().lidar_ground_truncated, "well above the floor: no truncation");
     });
     test("averaging pad readings beats a single reading", || {
         let pad = Pad::new();
@@ -284,7 +285,7 @@ pub fn run() {
         let (truth, sigma) = (0.30, 0.01);
         let mut rng = Rng::new(41);
         let mut first = None;
-        for k in 400..520 {
+        for k in 400..820 {
             let mut i = pad.inputs(k, false);
             if i.lidar.is_some() {
                 let r = truth + rng.normal(sigma);
@@ -351,5 +352,74 @@ pub fn run() {
             let s = nav.status().counts;
             assert_eq!((s.imu.rejected, s.imu_gaps), (s0.imu.rejected, s0.imu_gaps), "nothing rejected");
         }
+    });
+    test("GNSS moving the pad height doesn't move the ground (the ground is taken at home)", || {
+        // regression: the ground used to be computed from the filter's own height, which a GNSS fix on the
+        // pad can move by tenths of a metre
+        let pad = Pad { pad_range: 0.30, ..Pad::new() };
+        let mut nav = mp::Navigator::new(mp::navigator_config());
+        drive(&mut nav, &pad, 0, 400, false);
+        for k in 400..820 {
+            let mut i = pad.inputs(k, false);
+            if k.is_multiple_of(4) {
+                // fixes 0.4 m too high, arriving while the ground average is collected
+                i.gnss = mp::GnssSample::new(1_000_000 + k * PERIOD_US, V3::new(0.0, 0.0, 0.4), V3::new(0.5, 0.5, 1.0));
+            }
+            nav.step(&i);
+            if k == 470 {
+                let z = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
+                assert!(z > 0.1, "the fixes moved the filter's pad height by a few tenths: {:.3} m", z);
+            }
+        }
+        assert!(nav.status().lidar_ground_measured);
+        assert_close(nav.ground_z().unwrap_or(f64::NAN), -0.30, 0.05, "ground height (within the lidar noise)");
+    });
+    test("arming before 50 pad readings keeps the fallback ground for the flight", || {
+        let pad = Pad { pad_range: 0.30, ..Pad::new() };
+        let cfg = mp::NavConfig { imu_height_above_pad: 0.05, ..mp::navigator_config() };
+        let mut nav = mp::Navigator::new(cfg);
+        drive(&mut nav, &pad, 0, 600, false); // aligned at 400, then 25 lidar readings
+        assert!(!nav.status().lidar_ground_measured, "25 of 50 readings");
+        let out = drive(&mut nav, &pad, 600, 1200, true); // armed: 75 more readings, in flight
+        assert_eq!(out.status.startup, mp::StartupState::Flying);
+        assert!(!out.status.lidar_ground_measured, "the partial average is dropped at arming");
+        assert_eq!(nav.ground_z(), Some(-0.05), "fallback kept for the flight");
+    });
+    test("pad readings near the lidar's floor: the average is not used and the fallback is kept", || {
+        // readings alternate between just below the 4 cm minimum and just above it: half are cut off
+        let cfg = mp::NavConfig { imu_height_above_pad: 0.05, ..mp::navigator_config() };
+        let mut nav = mp::Navigator::new(cfg);
+        let pad = Pad { pad_range: 0.05, ..Pad::new() };
+        drive(&mut nav, &pad, 0, 400, false);
+        for k in 400..1400 {
+            let mut i = pad.inputs(k, false);
+            if i.lidar.is_some() && (k / 8).is_multiple_of(2) {
+                i.lidar = mp::LidarSample::new(1_000_000 + k * PERIOD_US, 0.035);
+            }
+            nav.step(&i);
+        }
+        let st = nav.status();
+        assert!(!st.lidar_ground_measured && st.lidar_ground_truncated, "fallback kept, flagged as truncation");
+        assert_eq!(nav.ground_z(), Some(-0.05), "the fallback");
+    });
+    test("a few readings below the floor (under 5 %) still give a measured ground", || {
+        let mut nav = mp::Navigator::new(mp::navigator_config());
+        let pad = Pad { pad_range: 0.30, ..Pad::new() };
+        drive(&mut nav, &pad, 0, 400, false);
+        let mut lidar_loops = 0;
+        for k in 400..1000 {
+            let mut i = pad.inputs(k, false);
+            if i.lidar.is_some() {
+                lidar_loops += 1;
+                if lidar_loops <= 2 {
+                    i.lidar = mp::LidarSample::new(1_000_000 + k * PERIOD_US, 0.02); // 2 below, then 50 valid: 3.8 %
+                }
+            }
+            nav.step(&i);
+        }
+        let st = nav.status();
+        assert!(st.lidar_ground_measured && !st.lidar_ground_truncated, "measured, not flagged");
+        let z = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
+        assert_close(z - nav.ground_z().unwrap_or(f64::NAN), 0.30, 1e-3, "predicted range on the pad");
     });
 }
