@@ -36,7 +36,7 @@ pub struct ImuPairConfig {
     pub max_skew_us: u64, // largest timestamp difference of a pair that is combined (microseconds)
 }
 
-/// Why only one IMU was used.
+/// reason why only one IMU may be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SingleReason {
     /// The other IMU had no (valid) sample.
