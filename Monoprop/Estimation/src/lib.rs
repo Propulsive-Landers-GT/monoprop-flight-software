@@ -39,3 +39,4 @@ pub mod align;
 pub use align::*;
 pub mod interop;
 pub use interop::*;
+pub mod monoprop; // not re-exported at the root: see monoprop/mod.rs

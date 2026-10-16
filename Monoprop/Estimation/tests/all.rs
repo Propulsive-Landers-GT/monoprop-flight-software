@@ -49,6 +49,20 @@ mod t_scenario_when_sensors_fail;
 mod t_interop;
 #[path = "unit/esekf_height.rs"]
 mod t_esekf_height;
+#[path = "unit/esekf_lidar.rs"]
+mod t_esekf_lidar;
+#[path = "unit/esekf_gps_offset.rs"]
+mod t_esekf_gps_offset;
+#[path = "unit/esekf_stationary.rs"]
+mod t_esekf_stationary;
+#[path = "unit/monoprop_inputs.rs"]
+mod t_monoprop_inputs;
+#[path = "unit/monoprop_imu_pair.rs"]
+mod t_monoprop_imu_pair;
+#[path = "unit/monoprop_navigator.rs"]
+mod t_monoprop_navigator;
+#[path = "unit/monoprop_flight.rs"]
+mod t_monoprop_flight;
 #[path = "unit/system.rs"]
 mod t_system;
 
@@ -101,6 +115,20 @@ fn main() {
     t_interop::run();
     support::section("esekf/height");
     t_esekf_height::run();
+    support::section("esekf/lidar");
+    t_esekf_lidar::run();
+    support::section("esekf/gps_offset");
+    t_esekf_gps_offset::run();
+    support::section("esekf/stationary");
+    t_esekf_stationary::run();
+    support::section("monoprop/inputs");
+    t_monoprop_inputs::run();
+    support::section("monoprop/imu_pair");
+    t_monoprop_imu_pair::run();
+    support::section("monoprop/navigator");
+    t_monoprop_navigator::run();
+    support::section("monoprop/flight: the navigator on simulated Monoprop flights");
+    t_monoprop_flight::run();
     support::section("system: the whole filter on simulated flights");
     t_system::run();
     support::finish();
