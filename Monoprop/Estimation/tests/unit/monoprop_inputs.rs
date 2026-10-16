@@ -88,7 +88,6 @@ pub fn run() {
             ("IMU_RATE_HZ", mp::IMU_RATE_HZ),
             ("SIGMA_POS", mp::SIGMA_POS),
             ("SIGMA_MAG", mp::SIGMA_MAG),
-            ("SIGMA_HEIGHT", mp::SIGMA_HEIGHT),
         ];
         for (name, v) in values {
             assert!(v.is_finite() && v > 0.0, "{} = {}", name, v);

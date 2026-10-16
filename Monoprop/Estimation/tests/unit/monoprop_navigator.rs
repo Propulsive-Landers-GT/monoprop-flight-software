@@ -65,24 +65,25 @@ pub fn run() {
         assert!(w.mean_accel().is_none() && w.mean_mag().is_none());
         assert!(!mp::is_still(&V3::new(0.0, 0.0, g + 1.0), &V3::zeros(), g, tol, wmax), "accelerating");
     });
-    test("start-up: Waiting -> Aligned -> OnPad -> Flying", || {
+    test("start-up: Waiting -> OnPad -> Flying", || {
         let pad = Pad::new();
         let mut nav = mp::Navigator::new(mp::navigator_config());
         let out = drive(&mut nav, &pad, 0, 399, false);
         assert_eq!(out.status.startup, mp::StartupState::Waiting, "399 still samples: not yet");
         assert!(out.estimate.is_none() && nav.position_f32().is_none(), "no estimate before alignment");
         let out = nav.step(&pad.inputs(399, false));
-        assert_eq!(out.status.startup, mp::StartupState::Aligned, "aligned on the 400th still sample");
-        assert!(!out.status.lidar_ground_known);
+        assert_eq!(out.status.startup, mp::StartupState::OnPad, "aligned, on the pad, on the 400th still sample");
+        assert!(!out.status.lidar_ground_measured, "ground from the fallback");
+        assert_eq!(nav.ground_z(), Some(-mp::IMU_HEIGHT_ABOVE_PAD));
         assert!(out.estimate.is_some(), "estimate after alignment");
         let Some(e) = out.estimate else { return };
         assert!(e.position.norm() < 1e-9 && boxminus(&e.attitude, &Quat::identity()).norm() < 1e-9, "level, at home");
-        let out = drive(&mut nav, &pad, 400, 401, false); // loop 400 carries a lidar reading
+        let out = drive(&mut nav, &pad, 400, 480, false); // 10 lidar readings
         assert_eq!(out.status.startup, mp::StartupState::OnPad);
-        assert!(out.status.lidar_ground_known);
-        let out = drive(&mut nav, &pad, 401, 402, true);
+        assert!(out.status.lidar_ground_measured, "ground from the pad readings");
+        let out = drive(&mut nav, &pad, 480, 481, true);
         assert_eq!(out.status.startup, mp::StartupState::Flying, "armed");
-        let out = drive(&mut nav, &pad, 402, 403, false);
+        let out = drive(&mut nav, &pad, 481, 482, false);
         assert_eq!(out.status.startup, mp::StartupState::Flying, "one-way");
     });
     test("a moving sample restarts the window, and armed prevents alignment", || {
@@ -109,7 +110,7 @@ pub fn run() {
         assert_eq!(out.status.startup, mp::StartupState::Waiting, "TRIAD can't use a vertical field");
         pad.mag = mag_reference() * 50.0;
         let out = drive(&mut nav, &pad, 800, 1200, false);
-        assert_eq!(out.status.startup, mp::StartupState::Aligned, "aligned once the readings are usable");
+        assert_eq!(out.status.startup, mp::StartupState::OnPad, "aligned once the readings are usable");
     });
     test("IMU timing: bad timestamps rejected, long gaps not integrated, no sample no prediction", || {
         let pad = Pad::new();
@@ -240,5 +241,115 @@ pub fn run() {
         let sa = per_sample_sigma(mp::bmi323::ACCEL_NOISE_DENSITY, mp::IMU_RATE_HZ);
         assert_close(c.still_gyro_max, 3f64.sqrt() * mp::bmi323::GYRO_ZERO_RATE_OFFSET + 5.0 * sg, 1e-15, "gyro threshold");
         assert_close(c.still_accel_tol, 3f64.sqrt() * mp::bmi323::ACCEL_OFFSET + 5.0 * sa, 1e-15, "accel threshold");
+    });
+    test("lidar too close on the pad: the fallback ground height is used and the lidar works in flight", || {
+        let pad = Pad { pad_range: 0.03, ..Pad::new() }; // below the 4 cm minimum
+        let cfg = mp::NavConfig { imu_height_above_pad: 0.05, ..mp::navigator_config() };
+        let mut nav = mp::Navigator::new(cfg);
+        let out = drive(&mut nav, &pad, 0, 600, false);
+        assert_eq!(out.status.startup, mp::StartupState::OnPad, "launch is not blocked by the lidar");
+        assert!(!out.status.lidar_ground_measured && out.status.counts.lidar.skipped > 0, "readings skipped");
+        assert_eq!(nav.ground_z(), Some(-0.05), "fallback: pad 5 cm below the IMU");
+        drive(&mut nav, &pad, 600, 602, true);
+        let s0 = nav.status().counts.lidar;
+        let z0 = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
+        let t = 1_000_000 + 602 * PERIOD_US;
+        let climb = mp::NavInputs { lidar: mp::LidarSample::new(t, 0.15), ..pad.inputs(602, true) };
+        let out = nav.step(&climb);
+        assert_eq!(out.status.counts.lidar.accepted, s0.accepted + 1, "fused in flight");
+        let z1 = out.estimate.map(|e| e.position.z).unwrap_or(f64::NAN);
+        assert!(z1 > z0 + 0.01, "height moved up towards 0.10 m: {} -> {}", z0, z1);
+    });
+    test("pad readings refine the fallback once 10 have been collected", || {
+        let pad = Pad { pad_range: 0.30, ..Pad::new() };
+        let cfg = mp::NavConfig { imu_height_above_pad: 0.05, ..mp::navigator_config() };
+        let mut nav = mp::Navigator::new(cfg);
+        drive(&mut nav, &pad, 0, 400, false);
+        let mut readings = 0;
+        for k in 400..520 {
+            let out = nav.step(&pad.inputs(k, false));
+            if k.is_multiple_of(8) {
+                readings += 1;
+                assert_eq!(out.status.lidar_ground_measured, readings >= 10, "after {} readings", readings);
+            }
+        }
+        let ground = nav.ground_z().unwrap_or(f64::NAN);
+        let z = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
+        assert_close(z - ground, 0.30, 1e-3, "predicted range on the pad");
+    });
+    test("averaging pad readings beats a single reading", || {
+        let pad = Pad::new();
+        let mut nav = mp::Navigator::new(mp::navigator_config());
+        drive(&mut nav, &pad, 0, 400, false);
+        let (truth, sigma) = (0.30, 0.01);
+        let mut rng = Rng::new(41);
+        let mut first = None;
+        for k in 400..520 {
+            let mut i = pad.inputs(k, false);
+            if i.lidar.is_some() {
+                let r = truth + rng.normal(sigma);
+                first.get_or_insert(r);
+                i.lidar = mp::LidarSample::new(1_000_000 + k * PERIOD_US, r);
+            }
+            nav.step(&i);
+        }
+        assert!(nav.status().lidar_ground_measured);
+        let z = nav.estimate().map(|e| e.position.z).unwrap_or(f64::NAN);
+        let averaged_error = ((z - nav.ground_z().unwrap_or(f64::NAN)) - truth).abs();
+        let single_error = (first.unwrap_or(f64::NAN) - truth).abs();
+        assert!(averaged_error < sigma / 2.0, "averaged error {:.4} m", averaged_error);
+        assert!(averaged_error < single_error, "averaged {:.4} m, first reading alone {:.4} m", averaged_error, single_error);
+    });
+    test("switching A -> B -> A keeps the clock even", || {
+        for off in [1000i64, -1000] {
+            let pad = Pad::new();
+            let (mut nav, k0) = on_pad(&pad);
+            let s0 = nav.status().counts;
+            let mut last_t = nav.estimate().map(|e| e.t_us).unwrap_or(0);
+            // a few combined loops (learn the offset), then A only, B only, A only
+            let pattern = [(true, true); 5].iter().chain([(true, false); 3].iter()).chain([(false, true); 3].iter()).chain([(true, false); 3].iter());
+            for (j, (use_a, use_b)) in pattern.enumerate() {
+                let t_a = 1_000_000 + (k0 + j as u64) * PERIOD_US;
+                let t_b = t_a.saturating_add_signed(off);
+                let i = mp::NavInputs {
+                    imu_a: if *use_a { mp::ImuSample::new(t_a, V3::new(0.0, 0.0, GRAVITY), V3::zeros()) } else { None },
+                    imu_b: if *use_b { mp::ImuSample::new(t_b, V3::new(0.0, 0.0, GRAVITY), V3::zeros()) } else { None },
+                    ..mp::NavInputs::default()
+                };
+                let t = nav.step(&i).estimate.map(|e| e.t_us).unwrap_or(0);
+                assert_eq!(t - last_t, PERIOD_US, "offset {} us, loop {}: dt must be one period", off, j);
+                last_t = t;
+            }
+            let s = nav.status().counts;
+            assert_eq!((s.imu.rejected, s.imu_gaps), (s0.imu.rejected, s0.imu_gaps), "nothing rejected");
+        }
+    });
+    test("switching with a jittering clock offset: every dt within the skew limit of one period", || {
+        let skew = mp::IMU_PAIR_MAX_SKEW_US;
+        for base in [600i64, -600] {
+            let pad = Pad::new();
+            let (mut nav, k0) = on_pad(&pad);
+            let s0 = nav.status().counts;
+            let mut last_t = nav.estimate().map(|e| e.t_us).unwrap_or(0);
+            let mut rng = Rng::new(51);
+            let pattern = [(true, true), (true, true), (true, false), (false, true), (false, true), (true, false), (true, true), (false, true), (true, false)];
+            for j in 0..200u64 {
+                let (use_a, use_b) = pattern[(j % pattern.len() as u64) as usize];
+                let jitter = ((rng.uniform() * 2.0 - 1.0) * 500.0) as i64;
+                let t_a = 1_000_000 + (k0 + j) * PERIOD_US;
+                let t_b = t_a.saturating_add_signed(base + jitter);
+                let i = mp::NavInputs {
+                    imu_a: if use_a { mp::ImuSample::new(t_a, V3::new(0.0, 0.0, GRAVITY), V3::zeros()) } else { None },
+                    imu_b: if use_b { mp::ImuSample::new(t_b, V3::new(0.0, 0.0, GRAVITY), V3::zeros()) } else { None },
+                    ..mp::NavInputs::default()
+                };
+                let t = nav.step(&i).estimate.map(|e| e.t_us).unwrap_or(0);
+                let dt = t as i64 - last_t as i64;
+                assert!((dt - PERIOD_US as i64).abs() <= skew as i64, "offset {} us, loop {}: dt {} us", base, j, dt);
+                last_t = t;
+            }
+            let s = nav.status().counts;
+            assert_eq!((s.imu.rejected, s.imu_gaps), (s0.imu.rejected, s0.imu_gaps), "nothing rejected");
+        }
     });
 }

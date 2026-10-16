@@ -77,10 +77,6 @@ pub const SIGMA_POS: f64 = 0.5;
 /// Magnetometer direction standard deviation per axis (unit vector, so unitless): the `sigma` of `update_mag`.
 pub const SIGMA_MAG: f64 = 0.02;
 
-// PLACEHOLDER: the measured noise of the tilt-corrected lidar height.
-/// Height standard deviation, m: the `sigma` of `update_height`.
-pub const SIGMA_HEIGHT: f64 = 0.05;
-
 // PLACEHOLDER(the existing height tests): the measured noise of the lidar's range.
 /// Lidar range standard deviation, m: the `sigma` of `update_lidar`.
 pub const SIGMA_LIDAR_RANGE: f64 = 0.05;
@@ -274,6 +270,15 @@ pub const MAX_IMU_GAP_PERIODS: u64 = 10;
 /// Longest gap between IMU samples that is still integrated, microseconds (25 000 at 400 Hz).
 pub const MAX_IMU_GAP_US: u64 = MAX_IMU_GAP_PERIODS * 1_000_000 / IMU_RATE_HZ as u64;
 
+// PLACEHOLDER(no hardware yet: the IMU sits on the pad until the drawings give its height).
+// TODO: set from the vehicle drawings (reference IMU above the pad surface).
+/// Height of the reference IMU above the pad surface, m: the lidar's ground height until pad readings refine it.
+pub const IMU_HEIGHT_ABOVE_PAD: f64 = 0.0;
+
+// PLACEHOLDER(choice): enough readings to average out the lidar's noise on the pad.
+/// Valid lidar readings on the pad averaged into the ground height.
+pub const LIDAR_GROUND_SAMPLES: u32 = 10;
+
 /// The navigator as set up for the Monoprop.
 pub fn navigator_config() -> NavConfig {
     NavConfig {
@@ -293,5 +298,7 @@ pub fn navigator_config() -> NavConfig {
         still_min_mag_samples: STILL_MIN_MAG_SAMPLES,
         still_accel_tol: still_accel_tol(),
         still_gyro_max: still_gyro_max(),
+        imu_height_above_pad: IMU_HEIGHT_ABOVE_PAD,
+        lidar_ground_samples: LIDAR_GROUND_SAMPLES,
     }
 }
