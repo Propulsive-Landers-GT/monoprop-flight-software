@@ -4,7 +4,7 @@
 //! - DATASHEET(BMI323): a value from the Bosch BMI323 datasheet (typical, high-performance mode).
 //! - PLACEHOLDER(source): a stand-in, with where it came from and what should replace it.
 use crate::*;
-use super::{ImuId, ImuPairConfig};
+use super::{ImuId, ImuPairConfig, NavConfig};
 
 // ---- unit conversion ----
 
@@ -224,4 +224,74 @@ pub fn gnss_mount_rotation() -> M3 {
 /// GNSS antenna position in the body frame, m: the `antenna_offset` of `update_gps_offset`.
 pub fn gnss_mount_offset() -> V3 {
     V3::zeros()
+}
+
+// ---- navigator: start-up and pad ----
+
+// PLACEHOLDER(task brief: 10 to 20 Hz, lower end): rate of the stationary updates on the pad.
+/// Stationary (zero-velocity and zero angular-rate) updates per second while on the pad.
+pub const STATIONARY_UPDATE_HZ: u64 = 10;
+
+/// Time between stationary updates, microseconds.
+pub const STATIONARY_UPDATE_PERIOD_US: u64 = 1_000_000 / STATIONARY_UPDATE_HZ;
+
+// PLACEHOLDER(choice: one second of stillness at the IMU_RATE_HZ placeholder): tune on the pad.
+/// Still IMU samples needed before aligning.
+pub const STILL_WINDOW_SAMPLES: u32 = IMU_RATE_HZ as u32;
+
+// PLACEHOLDER(choice: alignment needs one magnetometer direction; more are averaged if they arrive).
+/// Magnetometer samples needed before aligning.
+pub const STILL_MIN_MAG_SAMPLES: u32 = 1;
+
+// PLACEHOLDER(choice): how many per-sample noise sigmas a still reading may be off by.
+/// Multiplier of the per-sample noise in the stillness thresholds.
+pub const STILL_NOISE_SIGMAS: f64 = 5.0;
+
+// PLACEHOLDER(derived from the BMI323 datasheet zero-rate offset and noise, and the IMU_RATE_HZ placeholder):
+// the worst-case gyro bias on all three axes (not known before alignment, so it must not count as motion)
+// plus STILL_NOISE_SIGMAS per-sample sigmas; about 0.042 rad/s at 400 Hz.
+// TODO: tighten once the gyro bias is measured.
+/// Largest angular rate that still counts as still, rad/s.
+pub fn still_gyro_max() -> f64 {
+    ComplexField::sqrt(3.0) * bmi323::GYRO_ZERO_RATE_OFFSET
+        + STILL_NOISE_SIGMAS * per_sample_sigma(bmi323::GYRO_NOISE_DENSITY, IMU_RATE_HZ)
+}
+
+// PLACEHOLDER(derived from the BMI323 datasheet accelerometer offset and noise, and the IMU_RATE_HZ
+// placeholder): the worst-case offset on all three axes plus STILL_NOISE_SIGMAS per-sample sigmas; about
+// 1.0 m/s^2 at 400 Hz, dominated by the offset.
+// TODO: tighten once the accelerometer bias is measured.
+/// Largest difference between the specific-force magnitude and gravity that still counts as still, m/s^2.
+pub fn still_accel_tol() -> f64 {
+    ComplexField::sqrt(3.0) * bmi323::ACCEL_OFFSET
+        + STILL_NOISE_SIGMAS * per_sample_sigma(bmi323::ACCEL_NOISE_DENSITY, IMU_RATE_HZ)
+}
+
+// PLACEHOLDER(choice: well past normal jitter, short enough that one step is still a small rotation).
+/// IMU sample periods in the longest gap that is still integrated.
+pub const MAX_IMU_GAP_PERIODS: u64 = 10;
+
+/// Longest gap between IMU samples that is still integrated, microseconds (25 000 at 400 Hz).
+pub const MAX_IMU_GAP_US: u64 = MAX_IMU_GAP_PERIODS * 1_000_000 / IMU_RATE_HZ as u64;
+
+/// The navigator as set up for the Monoprop.
+pub fn navigator_config() -> NavConfig {
+    NavConfig {
+        imu_pair: imu_pair_config(),
+        imu_spec: bmi323_spec(IMU_RATE_HZ),
+        lidar: lidar_config(0.0),
+        antenna_offset: gnss_mount_offset(),
+        gravity: GRAVITY,
+        sigma_pos: SIGMA_POS,
+        sigma_mag: SIGMA_MAG,
+        sigma_lidar_range: SIGMA_LIDAR_RANGE,
+        sigma_zero_velocity: SIGMA_ZERO_VELOCITY,
+        sigma_zero_rate: sigma_zero_rate(),
+        stationary_period_us: STATIONARY_UPDATE_PERIOD_US,
+        max_imu_gap_us: MAX_IMU_GAP_US,
+        still_window_samples: STILL_WINDOW_SAMPLES,
+        still_min_mag_samples: STILL_MIN_MAG_SAMPLES,
+        still_accel_tol: still_accel_tol(),
+        still_gyro_max: still_gyro_max(),
+    }
 }

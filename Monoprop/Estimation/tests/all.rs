@@ -59,6 +59,8 @@ mod t_esekf_stationary;
 mod t_monoprop_inputs;
 #[path = "unit/monoprop_imu_pair.rs"]
 mod t_monoprop_imu_pair;
+#[path = "unit/monoprop_navigator.rs"]
+mod t_monoprop_navigator;
 #[path = "unit/system.rs"]
 mod t_system;
 
@@ -121,6 +123,8 @@ fn main() {
     t_monoprop_inputs::run();
     support::section("monoprop/imu_pair");
     t_monoprop_imu_pair::run();
+    support::section("monoprop/navigator");
+    t_monoprop_navigator::run();
     support::section("system: the whole filter on simulated flights");
     t_system::run();
     support::finish();
