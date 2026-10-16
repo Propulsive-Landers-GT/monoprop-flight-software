@@ -4,10 +4,25 @@ version = "0.1.0"
 edition = "2024" 
 rust-version = "1.87"
 
+[features]
+default = ["rt"]
+# Teensy 4.1 runtime (boot header, vector table, the t4link.x linker script). The firmware binary needs it;
+# the host tests of the library build without it: cargo test -p Drone --lib --no-default-features
+rt = ["teensy4-bsp/rt"]
+# Stack high-water check for the first hardware boot (off in flight builds; see src/stack.rs).
+stack-check = []
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "Drone"
+path = "src/main.rs"
+required-features = ["rt"]
+
 [dependencies]
 Common = { path = "../Common" }
 cortex-m = "0.7"
-cortex-m-rt = "0.7"
 heapless = "0.7"
 nb = "1.0"
 teensy4-bsp = "0.5"

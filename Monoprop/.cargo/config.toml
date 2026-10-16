@@ -1,0 +1,22 @@
+# Teensy 4.1 linker script and stack size, for the Drone firmware.
+#
+# The linker flag is scoped to the Teensy target, so host builds (Estimation's tests, GroundControl) are not
+# affected, and no default build target is set. Cargo reads this file from the directory it is run in and
+# its parents: run cargo from Monoprop/ or below (cargo ... --manifest-path from the repo root would not
+# see it).
+#
+# Build and flash (see Drone/src/main.rs). The firmware is built with --release: a debug build does not fit
+# the Teensy's 192 KiB of ITCM (code memory) and fails to link.
+#   cargo build -p Drone --release --target thumbv7em-none-eabihf
+#   rust-objcopy -O ihex target/thumbv7em-none-eabihf/release/Drone Drone.hex
+#   teensy_loader_cli --mcu=TEENSY41 -w -v Drone.hex
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tt4link.x"]
+
+[env]
+# Stack size, read by teensy4-bsp's build script (default 16 KiB). The Navigator's predict/update chain uses
+# far more than 16 KiB (Navigator::step and Esekf::update each have a ~12 KB frame of 15x15 temporaries);
+# 64 KiB of the 320 KiB DTCM keeps it under half. A Drone host test (stack_budget) checks the frames against
+# this value. NOTE for the team: trimming the 15x15 temporaries in Esekf::update (David's code, later)
+# would cut this a lot.
+TEENSY4_STACK_SIZE = "64k"
