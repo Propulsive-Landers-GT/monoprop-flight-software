@@ -14,9 +14,7 @@
 rustflags = ["-C", "link-arg=-Tt4link.x"]
 
 [env]
-# Stack size, read by teensy4-bsp's build script (default 16 KiB). The Navigator's predict/update chain uses
-# far more than 16 KiB (Navigator::step and Esekf::update each have a ~12 KB frame of 15x15 temporaries);
-# 64 KiB of the 320 KiB DTCM keeps it under half. A Drone host test (stack_budget) checks the frames against
-# this value. NOTE for the team: trimming the 15x15 temporaries in Esekf::update (David's code, later)
-# would cut this a lot.
+# Stack size, read by teensy4-bsp's build script (default 16 KiB). The filter's predict/update chain has
+# frames of about 12 KB each (15x15 temporaries) and doesn't fit 16 KiB; 64 KiB of the 320 KiB DTCM does.
+# TODO: trimming the 15x15 temporaries in Esekf::update (David's code) would cut this a lot.
 TEENSY4_STACK_SIZE = "64k"

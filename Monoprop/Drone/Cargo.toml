@@ -6,11 +6,8 @@ rust-version = "1.87"
 
 [features]
 default = ["rt"]
-# Teensy 4.1 runtime (boot header, vector table, the t4link.x linker script). The firmware binary needs it;
-# the host tests of the library build without it: cargo test -p Drone --lib --no-default-features
+# Teensy 4.1 runtime; the host tests build without it: cargo test -p Drone --no-default-features
 rt = ["teensy4-bsp/rt"]
-# Stack high-water check for the first hardware boot (off in flight builds; see src/stack.rs).
-stack-check = []
 
 [lib]
 path = "src/lib.rs"
@@ -29,3 +26,6 @@ teensy4-bsp = "0.5"
 postcard = "1.0"
 nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
 Estimation = { path = "../Estimation" }
+
+[build-dependencies]
+toml = "0.8"

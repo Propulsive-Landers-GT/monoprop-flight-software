@@ -1,33 +1,29 @@
 //! Monoprop drone firmware for the Teensy 4.1.
 //!
-//! Build and flash (from Monoprop/, so .cargo/config.toml adds the t4link.x linker script and the 64 KiB
-//! stack). Always with --release: a debug build does not fit the Teensy's 192 KiB of ITCM and fails to link.
+//! Build and flash from Monoprop/ (so .cargo/config.toml adds the linker script and the 64 KiB stack), always
+//! with --release: a debug build doesn't fit the Teensy's 192 KiB of ITCM.
 //!   cargo build -p Drone --release --target thumbv7em-none-eabihf
-//!   rust-objcopy -O ihex target/thumbv7em-none-eabihf/release/Drone Drone.hex   (cargo-binutils / llvm-tools)
-//!   teensy_loader_cli --mcu=TEENSY41 -w -v Drone.hex                           (or the Teensy Loader app)
-//! For the first boot, add `--features stack-check` to see the stack high-water mark on the LED.
-//!
-//! Stack: 64 KiB (TEENSY4_STACK_SIZE in .cargo/config.toml). The Navigator's update chain needs about 28 KB
-//! (checked by the stack_budget host test). NOTE for the team: trimming the 15x15 temporaries in
-//! Esekf::update (David's code, later) would cut that a lot.
-//!
-//! Each 1 ms loop: read the clock, handle ground commands, step the Navigator, queue telemetry at about
-//! 50 Hz, push queued bytes to the UART without waiting, drive the LED.
-//!
-//! NOTE: the sensors are stubs until drivers exist, so the Navigator never aligns and `go` is always
-//! refused (three fast LED blinks).
+//!   rust-objcopy -O ihex target/thumbv7em-none-eabihf/release/Drone Drone.hex
+//!   teensy_loader_cli --mcu=TEENSY41 -w -v Drone.hex
 #![no_std]
 #![no_main]
-
-#[allow(dead_code)] // kept until retired: the Navigator now provides the telemetry
-mod sensor_fusion_crate;
 
 use teensy4_bsp as bsp;
 use bsp::board;
 use bsp::hal::gpt;
 use Common::GroundCommand;
-use Drone::link::{TxQueue, WrapExtender};
-use Drone::nav::{CommandOutcome, Command, FlightControl, NavLink, Sensors, armed};
+use Drone::clock::WrapExtender;
+use Drone::config::CONFIG;
+use Drone::navigator::{Navigator, encode_telemetry};
+use Drone::sensors;
+
+// State machine for monocopter
+#[derive(Copy, Clone, PartialEq)]
+enum DroneState {
+    Idle,
+    Flying,
+    Landing,
+}
 
 #[bsp::rt::entry]
 fn main() -> ! {
@@ -40,9 +36,6 @@ fn main() -> ! {
         ..
     } = board::t41(board::instances());
 
-    #[cfg(feature = "stack-check")]
-    Drone::stack::paint();
-
     // Create LPUART peripheral for communication with ESP32
     // where pins.p1 = LPUART6_TX, pins.p0 = LPUART6_RX
     let mut lpuart6 = board::lpuart(lpuart6, pins.p1, pins.p0, 115200);
@@ -50,34 +43,28 @@ fn main() -> ! {
     // Create the LED peripheral. There is only one LED on the Teensy 4.1, connected to pin 13.
     let led = board::led(&mut gpio2, pins.p13);
 
-    // GPT1: the 1 ms loop delay
     gpt1.set_clock_source(bsp::hal::gpt::ClockSource::PeripheralClock);
     let mut delay = bsp::hal::timer::Blocking::<_, 1_000_000>::from_gpt(gpt1);
 
-    // GPT2: the free-running microsecond clock (PERCLK is 1 MHz, see board::PERCLK_FREQUENCY)
+    // GPT2 free-running at PERCLK (1 MHz): the microsecond clock
     gpt2.disable();
     gpt2.set_clock_source(gpt::ClockSource::PeripheralClock);
     gpt2.set_divider(1);
     gpt2.set_mode(gpt::Mode::FreeRunning);
     gpt2.set_reset_on_enable(true);
     gpt2.enable();
-    let mut clock = WrapExtender::new();
+    let mut clock = WrapExtender::default();
 
     let mut buf = [0u8; 256];
     let mut idx = 0;
+    let mut state = DroneState::Idle;
     let mut latest_cmd: Option<GroundCommand> = None; // Store latest control command
     const GROUND_COMMAND_SIZE: usize = core::mem::size_of::<GroundCommand>();
 
-    // initialize sensors (if that's smth we need to do idk
-    sensor_fusion_crate::uwb_init();
-    sensor_fusion_crate::imu_init();
-
-    let mut sensors = Sensors::stubs(); // TODO: drivers for the BMI323s, AK09918, VL53L1X and GNSS
-    let mut nav = NavLink::new(); // in main's frame for the whole run (about 3 KB)
-    let mut fc = FlightControl::new();
-    let mut tx = TxQueue::new();
-    #[cfg(feature = "stack-check")]
-    let mut stack_kib: Option<(u64, u64)> = None; // (measured at, KiB used)
+    let mut nav = Navigator::new(&CONFIG); // also initialises the sensors
+    let mut tx = [0u8; 64];
+    let (mut tx_len, mut tx_pos) = (0usize, 0usize);
+    let mut next_tx_us = 0u64;
 
     loop {
         let now = clock.extend(gpt2.count());
@@ -101,10 +88,7 @@ fn main() -> ! {
                 // Check for text commands (e.g., "go\n" for state changes)
                 if byte == b'\n' || byte == b'\r' {
                     if let Some(cmd) = recognize_command(&buf[..idx.saturating_sub(1)]) {
-                        // go is accepted only with the Navigator OnPad; kill also restarts the Navigator
-                        if fc.command(cmd, nav.startup(), now) == CommandOutcome::Killed {
-                            nav.reset();
-                        }
+                        state = handle_command(cmd, state);
                     }
                     idx = 0; // Reset buffer
                 }
@@ -113,21 +97,27 @@ fn main() -> ! {
             Err(_) => {}
         }
 
-        // Navigator: this loop's new samples (none from the stubs), armed once launched
-        let inputs = sensors.poll(now, armed(fc.state));
-        nav.step(&inputs);
+        let vehicle = nav.update(&sensors::read(now));
 
-        // Telemetry at about 50 Hz once the Navigator has an estimate (from OnPad on, intended), never
-        // waiting for the UART: a packet due while the previous one is still being sent is dropped
-        if let Some(t) = nav.telemetry() {
-            if fc.telemetry_rate.due(now) && !tx.load(&t) {
-                fc.telemetry_drops = fc.telemetry_drops.saturating_add(1);
+        // Telemetry, never waiting for the UART: a packet is started at most every period_us, only once the
+        // previous one has gone out; each loop sends what the UART accepts.
+        if let Some(v) = vehicle {
+            if tx_pos >= tx_len && now >= next_tx_us {
+                if let Some(n) = encode_telemetry(&v, &mut tx) {
+                    (tx_len, tx_pos) = (n, 0);
+                }
+                next_tx_us = now.saturating_add(CONFIG.telemetry_period_us);
             }
         }
-        tx.pump(|b| lpuart6.try_write(b));
+        while let Some(&b) = tx.get(tx_pos).filter(|_| tx_pos < tx_len) {
+            if !lpuart6.try_write(b) {
+                break;
+            }
+            tx_pos += 1;
+        }
 
         // Control loop - only when flying or landing
-        if armed(fc.state) {
+        if state == DroneState::Flying || state == DroneState::Landing {
             if let Some(cmd) = &latest_cmd {
                 // Apply current control: thrust, gimbal angles, body rates
                 let _thrust = cmd.thrust_seq[0];
@@ -141,24 +131,15 @@ fn main() -> ! {
             }
         }
 
-        // LED: heartbeat, or three fast blinks after a refused go
-        #[allow(unused_mut)]
-        let mut led_on = fc.led_on(now);
-        #[cfg(feature = "stack-check")]
-        {
-            // PLACEHOLDER(choice): measure once, 10 s after boot, then show it on the LED instead
-            if stack_kib.is_none() && now >= 10_000_000 {
-                let used = u64::from(Drone::stack::high_water_bytes());
-                stack_kib = Some((now, used.div_ceil(1024)));
-            }
-            if let Some((at, kib)) = stack_kib {
-                led_on = Drone::nav::stack_code_led(now.saturating_sub(at), kib);
-            }
-        }
-        if led_on { led.set() } else { led.clear() }
-
+        led.toggle();
         delay.block_ms(1);  // 1ms loop
     }
+}
+
+enum Command {
+    Go,
+    Land,
+    Kill,
 }
 
 fn recognize_command(data: &[u8]) -> Option<Command> {
@@ -167,6 +148,15 @@ fn recognize_command(data: &[u8]) -> Option<Command> {
         b"land" => Some(Command::Land),
         b"kill" => Some(Command::Kill),
         _ => None,
+    }
+}
+
+fn handle_command(cmd: Command, current_state: DroneState) -> DroneState {
+    match cmd {
+        Command::Go if current_state == DroneState::Idle => DroneState::Flying,
+        Command::Land if current_state == DroneState::Flying => DroneState::Landing,
+        Command::Kill => DroneState::Idle,
+        _ => current_state,
     }
 }
 

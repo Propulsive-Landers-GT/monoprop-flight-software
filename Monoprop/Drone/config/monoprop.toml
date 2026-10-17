@@ -1,0 +1,83 @@
+# Monoprop vehicle parameters, compiled into the firmware by build.rs (the Teensy can't read files at run
+# time). The build fails on a missing or unknown key, a non-finite number or a non-positive noise value.
+# Frames: body x forward, y left, z up; navigation east, north, up, origin at the IMU at alignment.
+
+[imu]
+# TODO: the BMI323's actual output data rate.
+rate_hz = 400.0                        # Hz
+# BMI323 datasheet, typical, high-performance mode: 180 ug/sqrt(Hz) = 180e-6 * 9.80665.
+accel_noise_density = 1.765197e-3      # m/s^2/sqrt(Hz)
+# BMI323 datasheet, typical, high-performance mode: 0.007 deg/s/sqrt(Hz) = 0.007 * pi/180.
+gyro_noise_density = 1.2217305e-4      # rad/s/sqrt(Hz)
+# TODO: from an Allan variance test; the BMI323 datasheet gives none. VN-200 value, probably too small.
+accel_bias_random_walk = 3.92266e-5    # m/s^2/sqrt(s)
+# TODO: from an Allan variance test; the BMI323 datasheet gives none. VN-200 value, probably too small.
+gyro_bias_random_walk = 4.8481368e-6   # rad/s/sqrt(s)
+# TODO: tune. 10 sample periods at 400 Hz; a longer gap between IMU samples is not integrated.
+max_gap_us = 25000                     # us
+
+[imu_pair]
+# TODO: which BMI323 is the reference (the combined sample, and the filter, sit at it).
+reference = "A"                        # "A" or "B"
+# TODO: measured mountings. Rotation from each IMU's axes to the body frame, as rows.
+a_rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+b_rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+# TODO: measured positions.
+a_offset = [0.0, 0.0, 0.0]             # m, body frame
+b_offset = [0.0, 0.0, 0.0]             # m, body frame
+# TODO: from how the two BMI323s are triggered. Half a 400 Hz period.
+max_skew_us = 1250                     # us, largest timestamp difference of a pair that is combined
+# TODO: tune. About 10 s at 400 Hz.
+diff_window = 4000                     # pairs in the running mean of the A-B difference
+# TODO: tune. About 1 s at 400 Hz.
+diff_min_pairs = 400                   # pairs before a single IMU is corrected by the difference
+
+[mag]
+# TODO: measure on the real magnetometer with the motor running; the main driver of the yaw error.
+sigma = 0.02                           # per axis, of the unit field direction (unitless)
+
+[lidar]
+# TODO: from the ST VL53L1X datasheet or bench data (depends on distance mode, ambient light, target);
+# conservative placeholder.
+sigma = 0.05                           # m
+# TODO: confirm against the ST datasheet (4 cm per Pololu's datasheet summary).
+min_range = 0.04                       # m
+# TODO: from vehicle tests; depends on distance mode and ambient light (short ~1.3 m, long ~4 m).
+max_range = 3.0                        # m
+# TODO: tune on the vehicle. 30 deg.
+max_tilt = 0.5235987755982988          # rad, largest beam angle from straight down that is used
+# TODO: measured mounting.
+offset = [0.0, 0.0, 0.0]               # m, sensor position in the body frame
+# TODO: measured beam direction; assumed straight down.
+beam = [0.0, 0.0, -1.0]                # unit vector, body frame
+
+[gps]
+# TODO: measured antenna position.
+antenna_offset = [0.0, 0.0, 0.0]       # m, body frame
+
+[pad]
+# TODO: from the vehicle drawings. Used as the ground height when the lidar can't read on the pad; a wrong
+# value is a vertical bias the filter can't see.
+imu_height_above_pad = 0.0             # m
+# TODO: tune. Valid lidar readings in the alignment window needed to measure the ground (at most about 50
+# fit in 1 s at 50 Hz).
+ground_samples = 40                    # readings
+
+[align]
+# TODO: tune on the pad. 1 s at 400 Hz.
+window_samples = 400                   # still IMU samples
+# TODO: tighten once the accelerometer bias is measured. sqrt(3) * 50 mg datasheet offset + 5 per-sample sigmas.
+accel_tol = 1.0258                     # m/s^2, largest |specific force| - g that counts as still
+# TODO: tighten once the gyro bias is measured. sqrt(3) * 1 deg/s datasheet offset + 5 per-sample sigmas.
+gyro_max = 0.04245                     # rad/s, largest rate that counts as still
+# TODO: tune. Uncertainty of the starting position. Home is defined as the IMU's position at alignment, so
+# the starting position is known; a large value lets the first lidar reading after alignment move the height
+# almost fully. Only the starting uncertainty: GPS updates use each fix's own sigma.
+sigma_pos = 0.02                       # m
+# TODO: tune (pad vibration). The stillness check has just shown the vehicle at rest, so its velocity is
+# known to about this; align's own 2 m/s (meant for an air start) lets it wander until GPS pulls it in.
+velocity_sigma = 0.05                  # m/s
+
+[telemetry]
+# TODO: tune; about 50 Hz, within what the 115200 baud link carries.
+period_us = 20000                      # us
