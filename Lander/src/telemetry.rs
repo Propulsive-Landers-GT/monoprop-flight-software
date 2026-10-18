@@ -372,7 +372,8 @@ pub fn build_flight_telemetry(
         position_age_s: (now - state.last_position_update) as f32,
         link_age_s,
         sensors: SensorSnapshot {
-            imu_ok: imu.is_some(),
+            // A non-finite sample is shown as received but flagged: the FSM does not use it.
+            imu_ok: imu.is_some_and(|s| s.is_finite()),
             gps_ok: sensor_data.gps_data.is_some(),
             uwb_ok: sensor_data.uwb_data.is_some(),
             accel: imu.map(|d| arr3_f32(&d.accel)).unwrap_or([0.0; 3]),

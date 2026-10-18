@@ -85,6 +85,11 @@ pub const JOG_TIMEOUT_S: f64 = 0.5;
 pub const JOG_MAX_GIMBAL_RAD: f64 = 15.0 * std::f64::consts::PI / 180.0;
 pub const JOG_MAX_THRUST_N: f64 = 1200.0;
 
+/// Longest gap without a valid IMU sample before the flight is terminated [s]. The IMU is flight
+/// critical, but drivers return no sample on ticks where nothing new has arrived, so a single empty
+/// tick must not end the flight. Within this window the last valid sample is held.
+pub const IMU_TIMEOUT_S: f64 = 1.0;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VehicleState {
     pub position: Vector3<f64>,
@@ -116,6 +121,12 @@ pub struct ControlLoopState {
     pub last_navigation_update: f64,
     pub last_mpc_update: f64,
     pub last_position_update: f64,
+    /// Newest IMU sample that passed validation (all values finite). The algorithms only ever see this.
+    pub last_imu_sample: Option<ImuSample>,
+    /// Mission time of `last_imu_sample` [s]; drives the `IMU_TIMEOUT_S` termination check.
+    pub last_imu_time: f64,
+    /// True while incoming IMU samples are being rejected as non-finite (limits diagnostics to one per episode).
+    pub imu_rejecting: bool,
     pub start_time: f64,
     pub vehicle_state: VehicleState,
     pub flight_terminated: bool,
@@ -147,6 +158,9 @@ impl Default for ControlLoopState {
             last_navigation_update: 0.0,
             last_mpc_update: 0.0,
             last_position_update: 0.0,
+            last_imu_sample: None,
+            last_imu_time: 0.0,
+            imu_rejecting: false,
             start_time: 0.0,
             vehicle_state: VehicleState::default(),
             flight_terminated: false,

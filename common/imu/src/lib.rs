@@ -15,7 +15,16 @@
 //! - Accelerometer and gyroscope are always present. Everything else is optional,
 //!   because only some IMUs provide it; [`ImuInfo::capabilities`] says which.
 
+//!
+//! # Drivers
+//!
+//! - [`StaticImu`]: placeholder that repeats a fixed reading.
+//! - [`vn300::Vn300`]: VectorNav VN-300 (and VN-200/VN-100) binary output over a serial port.
+
 #![no_std]
+
+#[cfg(test)]
+extern crate std;
 
 mod info;
 mod mounting;
@@ -23,6 +32,7 @@ mod sample;
 mod static_imu;
 mod traits;
 pub mod units;
+pub mod vn300;
 
 pub use info::{Capabilities, ImuInfo, NoiseSpec};
 pub use mounting::Mounting;

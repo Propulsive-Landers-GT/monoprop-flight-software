@@ -70,7 +70,14 @@ impl Autopilot {
 
     pub fn update_navigator(&mut self, state: &mut ControlLoopState, sensor_data: &SensorData, now: f64, dt: f64) -> bool {
         let in_prelaunch = state.flight_phase == FlightPhase::Standby || state.flight_phase == FlightPhase::Armed;
-        if let Some(mut updated_state) = self.navigator.update(sensor_data, dt, in_prelaunch) {
+        // No valid IMU sample (none received yet, or past IMU_TIMEOUT_S): skip the filter rather than
+        // propagate it on invented data. The FSM's IMU timeout terminates the flight if this persists.
+        let navigator_output = if sensor_data.imu_data.is_some() {
+            self.navigator.update(sensor_data, dt, in_prelaunch)
+        } else {
+            None
+        };
+        if let Some(mut updated_state) = navigator_output {
             updated_state.mass = state.mass;
             updated_state.dry_mass = state.vehicle_state.dry_mass;
             state.sensor_fusion_state = self.navigator.get_state_vector();

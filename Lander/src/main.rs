@@ -156,7 +156,9 @@ fn main() {
         // Initialize sensor readings
         // TODO: Update sensor inits to either be more realistic or Nones until we start recieving to help gate bad starts
         //       Cannot guarantee what the data will look like on start and we shouldn't assume we'll always know
-        // A read error is reported and treated as missing IMU data, which the FSM's termination check handles.
+        // No new sample this tick (Ok(None)) and a read error both pass None. The FSM holds the last valid
+        // sample and only terminates once none has arrived for IMU_TIMEOUT_S. The raw sample is logged
+        // below as received, NaN/Inf included; the FSM keeps invalid samples away from the algorithms.
         let imu_data = match imu_source.read(mission_time) {
             Ok(sample) => sample,
             Err(e) => {
