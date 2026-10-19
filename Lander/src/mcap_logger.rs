@@ -66,7 +66,7 @@ impl McapLogger {
             let sensor_channel = writer.add_channel(
                 0,
                 "telemetry/sensor_data",
-                "application/json",
+                "json",
                 &sensor_metadata,
             ).unwrap();
             
@@ -77,7 +77,7 @@ impl McapLogger {
             let state_channel = writer.add_channel(
                 0,
                 "telemetry/vehicle_state",
-                "application/json",
+                "json",
                 &state_metadata,
             ).unwrap();
             
@@ -89,7 +89,7 @@ impl McapLogger {
             let control_channel = writer.add_channel(
                 0,
                 "telemetry/control_output",
-                "application/json",
+                "json",
                 &control_metadata,
             ).unwrap();
             
@@ -101,7 +101,7 @@ impl McapLogger {
             let phase_channel = writer.add_channel(
                 0,
                 "telemetry/flight_phase",
-                "application/json",
+                "json",
                 &phase_metadata,
             ).unwrap();
             
@@ -113,7 +113,7 @@ impl McapLogger {
             let diagnostics_channel = writer.add_channel(
                 0,
                 "telemetry/diagnostics",
-                "application/json",
+                "json",
                 &diagnostics_metadata,
             ).unwrap();
             
