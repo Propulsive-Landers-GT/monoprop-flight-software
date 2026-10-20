@@ -1,8 +1,3 @@
-//! Monoprop navigator, like Lander's navigator.rs: initialises the sensors, takes their samples and keeps the
-//! vehicle state with Estimation's ES-EKF. Two IMUs, combined into one sample in imu_pair.rs.
-//! - No arming gate: telemetry is empty until aligned, so wait for it before `go`.
-//! - No re-alignment after `kill`.
-//! - No pad updates, so the accelerometer bias isn't learned before launch.
 use Common::DroneTelemetry;
 use Estimation::{align, lidar_ground_z, mag_reference, Esekf, ImuSpec, LidarConfig, Nominal, GRAVITY, V3};
 

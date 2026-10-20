@@ -1,10 +1,3 @@
-//! Monoprop drone firmware for the Teensy 4.1.
-//!
-//! Build and flash from Monoprop/ (so .cargo/config.toml adds the linker script and the 64 KiB stack), always
-//! with --release: a debug build doesn't fit the Teensy's 192 KiB of ITCM.
-//!   cargo build -p Drone --release --target thumbv7em-none-eabihf
-//!   rust-objcopy -O ihex target/thumbv7em-none-eabihf/release/Drone Drone.hex
-//!   teensy_loader_cli --mcu=TEENSY41 -w -v Drone.hex
 #![no_std]
 #![no_main]
 
