@@ -49,6 +49,10 @@ mod t_scenario_when_sensors_fail;
 mod t_interop;
 #[path = "unit/esekf_height.rs"]
 mod t_esekf_height;
+#[path = "unit/esekf_lidar.rs"]
+mod t_esekf_lidar;
+#[path = "unit/esekf_gps_offset.rs"]
+mod t_esekf_gps_offset;
 #[path = "unit/system.rs"]
 mod t_system;
 
@@ -101,6 +105,10 @@ fn main() {
     t_interop::run();
     support::section("esekf/height");
     t_esekf_height::run();
+    support::section("esekf/lidar");
+    t_esekf_lidar::run();
+    support::section("esekf/gps_offset");
+    t_esekf_gps_offset::run();
     support::section("system: the whole filter on simulated flights");
     t_system::run();
     support::finish();

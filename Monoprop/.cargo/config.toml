@@ -1,0 +1,5 @@
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=-Tt4link.x"]
+
+[env]
+TEENSY4_STACK_SIZE = "64k"
