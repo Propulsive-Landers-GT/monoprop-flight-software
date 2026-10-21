@@ -2,7 +2,9 @@ use Lander::fsm::FlightStateMachine;
 use Lander::state::{self, SensorData};
 use Lander::mcap_logger::McapLogger;
 use Lander::telemetry::{self, GroundLink};
-use imu::{Imu, StaticImu};
+use Lander::imu_serial::{self, Vn300Config};
+use Lander::state::IMU_TIMEOUT_S;
+use imu::Imu;
 use std::sync::mpsc::{self, Receiver};
 
 fn spawn_stdin_channel() -> Receiver<String> {
@@ -81,14 +83,15 @@ fn ground_link_port() -> u16 {
         .unwrap_or(gs_protocol::DEFAULT_VEHICLE_PORT)
 }
 
-/// Placeholder IMU degrees of freedom from env `IMU_DOF`: 6 (accel + gyro) or 9 (+ magnetometer, default).
-fn placeholder_imu() -> StaticImu {
+/// IMU degrees of freedom from env `IMU_DOF`: 9 (accel + gyro + magnetometer, default) or 6, which
+/// drops the VN-300's magnetometer readings so the navigator runs without its magnetometer update.
+fn imu_six_dof() -> bool {
     match std::env::var("IMU_DOF").ok().as_deref().map(str::trim) {
-        None | Some("") | Some("9") => StaticImu::level_at_rest(),
-        Some("6") => StaticImu::level_at_rest_6dof(),
+        None | Some("") | Some("9") => false,
+        Some("6") => true,
         Some(other) => {
             println!("[Warning] IMU_DOF='{}' is not 6 or 9. Using 9-DOF.", other);
-            StaticImu::level_at_rest()
+            false
         }
     }
 }
@@ -105,11 +108,6 @@ fn main() {
     
     let clock = Clock::new();
 
-    // Placeholder IMU until a hardware driver exists: a level vehicle at rest, with the EKF's world
-    // magnetic field [T] unless IMU_DOF=6. Any type implementing `imu::Imu` can replace it.
-    let mut imu_source = placeholder_imu();
-    println!("IMU: {}", imu_source.info().model);
-
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -117,6 +115,31 @@ fn main() {
     let log_filename = format!("flight_log_{}.mcap", timestamp);
     let mut mcap_logger = McapLogger::new(&log_filename).expect("Failed to initialize MCAP logger");
     println!("Logging telemetry to {}", log_filename);
+
+    // The VN-300 on its serial port (settings: see Lander::imu_serial). Without it the FSM gets no IMU
+    // samples and terminates the flight after IMU_TIMEOUT_S, as it would for a sensor failure in flight.
+    let vn300_cfg = Vn300Config::from_env();
+    let mut imu_source = match imu_serial::open_vn300(&vn300_cfg) {
+        Ok(vn300) => {
+            println!("IMU: {} on {} at {} baud", vn300.info().model, vn300_cfg.port, vn300_cfg.baud);
+            Some(vn300)
+        }
+        Err(e) => {
+            let msg = format!(
+                "[Warning] VN-300 unavailable: {}. Set VN300_PORT to its serial device. Without an IMU the flight terminates after {:.1}s.",
+                e, IMU_TIMEOUT_S
+            );
+            println!("{}", msg);
+            let _ = mcap_logger.log_diagnostics(0, &msg);
+            None
+        }
+    };
+    let six_dof = imu_six_dof();
+    if six_dof {
+        println!("IMU_DOF=6: magnetometer readings are dropped");
+    }
+    let mut imu_error_reported = false;
+    let mut next_imu_stats_time = 10.0;
         
     // Ground-station link. Telemetry is a convenience, never a reason not to fly.
     let port = ground_link_port();
@@ -159,15 +182,42 @@ fn main() {
         // No new sample this tick (Ok(None)) and a read error both pass None. The FSM holds the last valid
         // sample and only terminates once none has arrived for IMU_TIMEOUT_S. The raw sample is logged
         // below as received, NaN/Inf included; the FSM keeps invalid samples away from the algorithms.
-        let imu_data = match imu_source.read(mission_time) {
-            Ok(sample) => sample,
-            Err(e) => {
-                let msg = format!("IMU read failed: {:?}", e);
-                println!("{}", msg);
-                let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
+        let mut imu_data = match imu_source.as_mut().map(|vn300| vn300.read(mission_time)) {
+            Some(Ok(sample)) => {
+                imu_error_reported = false;
+                sample
+            }
+            Some(Err(e)) => {
+                // Once per failure episode, not every 2 ms tick.
+                if !imu_error_reported {
+                    imu_error_reported = true;
+                    let msg = format!("IMU read failed: {}", e);
+                    println!("{}", msg);
+                    let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
+                }
                 None
             }
+            None => None,
         };
+        if six_dof {
+            if let Some(sample) = imu_data.as_mut() {
+                sample.mag = None;
+            }
+        }
+
+        // VN-300 link health every 10 s: packet count, CRC failures, configuration mismatches.
+        if let Some(vn300) = imu_source.as_ref() {
+            if mission_time >= next_imu_stats_time {
+                next_imu_stats_time += 10.0;
+                let st = vn300.stats();
+                let msg = format!(
+                    "VN-300 link: {} packets, {} superseded, {} CRC errors, {} unsupported, {} incomplete, {} bytes skipped",
+                    st.packets, st.superseded, st.crc_errors, st.unsupported, st.incomplete, st.bytes_skipped
+                );
+                println!("{}", msg);
+                let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
+            }
+        }
         let sensor_data = SensorData {
             timestamp: mission_time,
             imu_data,

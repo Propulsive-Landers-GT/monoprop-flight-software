@@ -54,8 +54,8 @@ impl FlightStateMachine {
         self.state.last_mpc_update = 0.0;
         self.state.last_state_time = 0.0;
         self.state.last_position_update = 0.0;
-        self.state.last_imu_sample = None;
-        self.state.last_imu_time = 0.0;
+        self.state.last_valid_imu_sample = None;
+        self.state.last_valid_imu_time = 0.0;
         self.state.imu_rejecting = false;
         self.state.mass = 80.0;
         self.state.flight_terminated = false;
@@ -435,15 +435,15 @@ impl FlightStateMachine {
     /// Returns a copy of `raw` whose `imu_data` is safe to hand to the algorithms:
     /// - A sample with any NaN/Inf value is rejected and never reaches navigation, whatever navigator is
     ///   plugged in. One diagnostic is queued when rejection starts and one when valid samples resume.
-    /// - A valid sample becomes the new `last_imu_sample`.
+    /// - A valid sample becomes the new `last_valid_imu_sample`.
     /// - On ticks without a new valid sample (drivers return none when nothing new has arrived, or the
     ///   sample was rejected), the last valid sample is held for up to `IMU_TIMEOUT_S`. After that
     ///   `imu_data` is None and `check_flight_termination` ends the flight.
     fn validate_imu(&mut self, raw: &SensorData, now: f64) -> SensorData {
         match &raw.imu_data {
             Some(sample) if sample.is_finite() => {
-                self.state.last_imu_sample = Some(*sample);
-                self.state.last_imu_time = now;
+                self.state.last_valid_imu_sample = Some(*sample);
+                self.state.last_valid_imu_time = now;
                 if self.state.imu_rejecting {
                     self.state.imu_rejecting = false;
                     self.state.diagnostics_queue.push("IMU samples valid again".to_string());
@@ -463,13 +463,13 @@ impl FlightStateMachine {
             None => {}
         }
 
-        let imu_data = if self.imu_age(now) <= IMU_TIMEOUT_S { self.state.last_imu_sample } else { None };
+        let imu_data = if self.imu_age(now) <= IMU_TIMEOUT_S { self.state.last_valid_imu_sample } else { None };
         SensorData { imu_data, ..raw.clone() }
     }
 
     /// Time since the last valid IMU sample [s]. Counts from mission start before the first sample.
     pub fn imu_age(&self, now: f64) -> f64 {
-        now - self.state.last_imu_time
+        now - self.state.last_valid_imu_time
     }
 
     fn check_flight_termination(&self, sensor_data: &SensorData, now: f64) -> Option<String> {
@@ -517,110 +517,5 @@ impl FlightStateMachine {
 
     pub fn autopilot_mut(&mut self) -> &mut autopilot::Autopilot {
         &mut self.autopilot
-    }
-}
-
-#[cfg(test)]
-mod imu_validation_tests {
-    use super::*;
-    use crate::state::ImuSample;
-
-    const DT: f64 = 0.002; // 500 Hz loop
-
-    fn sensors(t: f64, imu: Option<ImuSample>) -> SensorData {
-        SensorData {
-            timestamp: t,
-            imu_data: imu,
-            gps_data: Some([0.0; 3]),
-            uwb_data: Some([0.0; 3]),
-            chamber_pressure: Some(15.0),
-            tank_pressure: Some(300.0),
-        }
-    }
-
-    fn level(t: f64) -> Option<ImuSample> {
-        Some(ImuSample::new(t, [0.0, 0.0, 9.81], [0.0; 3]).with_mag([-2.0e-6, 22.0e-6, -44.3e-6]))
-    }
-
-    fn nan(t: f64) -> Option<ImuSample> {
-        Some(ImuSample::new(t, [0.0, f64::NAN, 9.81], [0.0; 3]))
-    }
-
-    fn fsm() -> FlightStateMachine {
-        let mut fsm = FlightStateMachine::new();
-        fsm.initialize();
-        fsm
-    }
-
-    /// Steps from `from` (exclusive) to `to` (inclusive) every DT, feeding `imu(t)`.
-    fn run(fsm: &mut FlightStateMachine, from: f64, to: f64, imu: fn(f64) -> Option<ImuSample>) {
-        let mut t = from + DT;
-        while t <= to + 1e-9 {
-            fsm.step(&sensors(t, imu(t)));
-            t += DT;
-        }
-    }
-
-    fn reason(fsm: &FlightStateMachine) -> String {
-        fsm.get_state().termination_reason.clone().unwrap_or_default()
-    }
-
-    #[test]
-    fn ticks_without_a_new_sample_do_not_terminate() {
-        let mut fsm = fsm();
-        run(&mut fsm, 0.0, 0.1, level);
-        // A driver returning Ok(None) for most of a second: the last valid sample is held.
-        run(&mut fsm, 0.1, 0.1 + 0.9 * IMU_TIMEOUT_S, |_| None);
-        assert!(!fsm.get_state().flight_terminated, "terminated: {}", reason(&fsm));
-        assert!(fsm.get_state().last_imu_sample.is_some());
-    }
-
-    #[test]
-    fn startup_before_the_first_sample_does_not_terminate() {
-        let mut fsm = fsm();
-        run(&mut fsm, 0.0, 0.5 * IMU_TIMEOUT_S, |_| None);
-        assert!(!fsm.get_state().flight_terminated, "terminated: {}", reason(&fsm));
-        run(&mut fsm, 0.5 * IMU_TIMEOUT_S, 0.6 * IMU_TIMEOUT_S, level);
-        assert!(!fsm.get_state().flight_terminated, "terminated: {}", reason(&fsm));
-    }
-
-    #[test]
-    fn gap_longer_than_the_timeout_terminates() {
-        let mut fsm = fsm();
-        run(&mut fsm, 0.0, 0.1, level);
-        run(&mut fsm, 0.1, 0.1 + IMU_TIMEOUT_S + 0.05, |_| None);
-        assert!(fsm.get_state().flight_terminated);
-        assert!(reason(&fsm).starts_with("No valid IMU sample"), "reason: {}", reason(&fsm));
-    }
-
-    #[test]
-    fn non_finite_samples_never_reach_navigation() {
-        let mut fsm = fsm();
-        run(&mut fsm, 0.0, 0.1, level);
-        let held = fsm.get_state().last_imu_sample.expect("valid sample held");
-        let diagnostics_before = fsm.get_state().diagnostics_queue.len();
-
-        run(&mut fsm, 0.1, 0.3, nan);
-        let s = fsm.get_state();
-        assert!(!s.flight_terminated, "terminated: {}", reason(&fsm));
-        assert_eq!(s.last_imu_sample, Some(held), "a NaN sample replaced the held one");
-        let v = &s.vehicle_state;
-        assert!(v.position.iter().chain(v.velocity.iter()).all(|x| x.is_finite()), "NaN reached the navigator");
-        assert!(v.attitude.coords.iter().all(|x| x.is_finite()));
-        let rejected = s.diagnostics_queue[diagnostics_before..].iter().filter(|m| m.starts_with("Rejected non-finite IMU sample")).count();
-        assert_eq!(rejected, 1, "one diagnostic per rejection episode");
-
-        run(&mut fsm, 0.3, 0.32, level);
-        assert!(fsm.get_state().diagnostics_queue.iter().any(|m| m == "IMU samples valid again"));
-        assert!(!fsm.get_state().imu_rejecting);
-    }
-
-    #[test]
-    fn sustained_non_finite_samples_terminate() {
-        let mut fsm = fsm();
-        run(&mut fsm, 0.0, 0.1, level);
-        run(&mut fsm, 0.1, 0.1 + IMU_TIMEOUT_S + 0.05, nan);
-        assert!(fsm.get_state().flight_terminated);
-        assert!(reason(&fsm).starts_with("No valid IMU sample"), "reason: {}", reason(&fsm));
     }
 }

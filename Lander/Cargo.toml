@@ -27,3 +27,6 @@ libc = "0.2"
 gs-protocol = { git = "https://github.com/Propulsive-Landers-GT/ground-system.git" }
 # Vehicle-independent IMU sample type and driver trait (shared no_std crate in common/).
 imu = { path = "../common/imu", features = ["serde"] }
+# Serial link to the VN-300 (src/imu_serial.rs). No default features: port enumeration is not
+# needed, which keeps the libudev system library out of the Linux build.
+serialport = { version = "4", default-features = false }

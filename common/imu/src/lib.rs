@@ -18,7 +18,6 @@
 //!
 //! # Drivers
 //!
-//! - [`StaticImu`]: placeholder that repeats a fixed reading.
 //! - [`vn300::Vn300`]: VectorNav VN-300 (and VN-200/VN-100) binary output over a serial port.
 
 #![no_std]
@@ -29,7 +28,6 @@ extern crate std;
 mod info;
 mod mounting;
 mod sample;
-mod static_imu;
 mod traits;
 pub mod units;
 pub mod vn300;
@@ -37,5 +35,4 @@ pub mod vn300;
 pub use info::{Capabilities, ImuInfo, NoiseSpec};
 pub use mounting::Mounting;
 pub use sample::{DeltaIntegrals, ImuSample, ImuStatus, Vec3};
-pub use static_imu::StaticImu;
 pub use traits::Imu;

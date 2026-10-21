@@ -58,7 +58,7 @@ The flight software is structured into four distinct, modular components designe
     *   **MPC Tracking Control (50 Hz)**: Triggers optimization controller updates.
 
 ### 3. Autopilot
-*   **Navigator (EKF)**: Fuses VN-200 IMU, GPS, and UWB telemetry inside a 15-state Error-State Kalman Filter (ES-EKF) to estimate vehicle position, velocity, attitude (quaternion), and sensor biases.
+*   **Navigator (EKF)**: Fuses VN-300 IMU, GPS, and UWB telemetry inside a 15-state Error-State Kalman Filter (ES-EKF) to estimate vehicle position, velocity, attitude (quaternion), and sensor biases.
 *   **Guidance (Lossless)**: Dynamically plans fuel-optimal reference trajectories using lossless convexification algorithms.
 *   **MPC Controller (PANOC)**: Tracks the reference trajectory using a Non-linear Model Predictive Control optimization solver.
 
@@ -157,7 +157,22 @@ During flight, the computer writes real-time telemetry into `flight_log_*.mcap` 
     cargo run
     ```
 3.  **Commanding**: Type `arm` followed by `launch` in the terminal to takeoff.
-4.  **IMU degrees of freedom**: the placeholder IMU is 9-DOF (accelerometer, gyroscope, magnetometer) by default. Set `IMU_DOF=6` to drop the magnetometer; the navigator then skips its magnetometer update.
+4.  **VN-300 IMU**: the flight software reads a VectorNav VN-300 over a serial port and sends it its binary output configuration at start-up. Point it at the right device with environment variables:
+
+    | Variable | Default | Meaning |
+    |---|---|---|
+    | `VN300_PORT` | `/dev/ttyUSB0` | Serial device (`COM3` style on Windows) |
+    | `VN300_BAUD` | `115200` | Baud rate the sensor is set to (factory default 115200) |
+    | `VN300_RATE_DIVISOR` | `4` | Binary output rate = the sensor's IMU rate / this |
+    | `VN300_CONFIGURE` | `1` | `0` skips the start-up configuration (sensor already configured and saved) |
+
+    ```bash
+    VN300_PORT=/dev/ttyTHS1 cargo run          # bash
+    $env:VN300_PORT="COM5"; cargo run          # PowerShell
+    ```
+    The IMU is flight critical: if the port cannot be opened, or no valid sample arrives for 1 s, the flight terminates. Without a sensor attached, use the simulator (`simulations` repo) instead.
+    A VN-300 link-health line (packets, CRC errors, unsupported packets) is printed and logged every 10 s.
+5.  **IMU degrees of freedom**: 9-DOF (accelerometer, gyroscope, magnetometer) by default. Set `IMU_DOF=6` to drop the VN-300's magnetometer readings; the navigator then skips its magnetometer update.
     ```bash
     IMU_DOF=6 cargo run           # bash
     $env:IMU_DOF=6; cargo run     # PowerShell (stays set for the session; Remove-Item Env:IMU_DOF to clear)

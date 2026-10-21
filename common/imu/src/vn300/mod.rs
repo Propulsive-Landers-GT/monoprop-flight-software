@@ -19,6 +19,8 @@
 //!   ASCII output off. Without it the sensor sends ASCII at 115200 baud and the driver returns no samples.
 //! - The [`Mounting`] for how the unit is installed on that vehicle.
 //!
+//! Without hardware, [`emulator`] turns simulated readings into VN-300 packets for this driver.
+//!
 //! # Example
 //!
 //! ```
@@ -37,6 +39,7 @@
 //! ```
 
 pub mod config;
+pub mod emulator;
 pub mod protocol;
 
 use crate::units::{deg_to_rad, gauss_to_tesla, g_to_mps2, kpa_to_pa};

@@ -18,6 +18,18 @@ impl Mounting {
         rotation: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
     };
 
+    /// The opposite rotation, body frame back into sensor axes (the transpose, since rotations are orthonormal).
+    pub fn inverse(&self) -> Self {
+        let r = &self.rotation;
+        Self {
+            rotation: [
+                [r[0][0], r[1][0], r[2][0]],
+                [r[0][1], r[1][1], r[2][1]],
+                [r[0][2], r[1][2], r[2][2]],
+            ],
+        }
+    }
+
     pub fn rotate(&self, v: Vec3) -> Vec3 {
         let r = &self.rotation;
         [
