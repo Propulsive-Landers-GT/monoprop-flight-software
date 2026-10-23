@@ -2,19 +2,13 @@ use ndarray::Array1;
 use nalgebra::{Vector3, UnitQuaternion};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ImuData {
-    pub accel: [f64; 3],
-    pub gyro: [f64; 3],
-    pub mag: [f64; 3],
-}
+/// IMU data in SI units and the Z-up body frame, from any IMU driver (see the `imu` crate).
+pub use imu::ImuSample;
 
-// TODO: Update the SensorData struct to be more representative of the data provided by the VN-200
-    // Bonus points if you can create an IMU abstraction to allow any IMU and it's data to be utilized
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SensorData {
     pub timestamp: f64,
-    pub imu_data: Option<ImuData>,
+    pub imu_data: Option<ImuSample>,
     pub gps_data: Option<[f64; 3]>,
     pub uwb_data: Option<[f64; 3]>,
     pub chamber_pressure: Option<f64>,
@@ -90,6 +84,9 @@ pub struct JogSetpoint {
 pub const JOG_TIMEOUT_S: f64 = 0.5;
 pub const JOG_MAX_GIMBAL_RAD: f64 = 15.0 * std::f64::consts::PI / 180.0;
 pub const JOG_MAX_THRUST_N: f64 = 1200.0;
+/// critical, but drivers return no sample on ticks where nothing new has arrived, so a single empty
+/// tick must not end the flight. Within this window the last valid sample is held.
+pub const IMU_TIMEOUT_S: f64 = 1.0;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VehicleState {
@@ -122,6 +119,9 @@ pub struct ControlLoopState {
     pub last_navigation_update: f64,
     pub last_mpc_update: f64,
     pub last_position_update: f64,
+    pub last_valid_imu_sample: Option<ImuSample>,
+    pub last_valid_imu_time: f64,
+    pub imu_rejecting: bool,
     pub start_time: f64,
     pub vehicle_state: VehicleState,
     pub flight_terminated: bool,
@@ -153,6 +153,9 @@ impl Default for ControlLoopState {
             last_navigation_update: 0.0,
             last_mpc_update: 0.0,
             last_position_update: 0.0,
+            last_valid_imu_sample: None,
+            last_valid_imu_time: 0.0,
+            imu_rejecting: false,
             start_time: 0.0,
             vehicle_state: VehicleState::default(),
             flight_terminated: false,

@@ -372,7 +372,7 @@ pub fn build_flight_telemetry(
         position_age_s: (now - state.last_position_update) as f32,
         link_age_s,
         sensors: SensorSnapshot {
-            imu_ok: imu.is_some(),
+            imu_ok: imu.is_some_and(|s| s.is_finite()),
             gps_ok: sensor_data.gps_data.is_some(),
             uwb_ok: sensor_data.uwb_data.is_some(),
             accel: imu.map(|d| arr3_f32(&d.accel)).unwrap_or([0.0; 3]),
@@ -430,14 +430,14 @@ pub fn build_stand_telemetry(fsm: &FlightStateMachine, sensor_data: &SensorData,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::ImuData;
+    use crate::state::ImuSample;
     use gs_protocol::JogSetpoint;
     use nalgebra::{UnitQuaternion, Vector3};
 
     fn sensors(t: f64) -> SensorData {
         SensorData {
             timestamp: t,
-            imu_data: Some(ImuData { accel: [0.1, 0.2, 9.81], gyro: [0.01, 0.02, 0.03], mag: [-2.0e-6, 22.0e-6, -44.3e-6] }), // the EKF's world field [T], level vehicle
+            imu_data: Some(ImuSample::new(t, [0.1, 0.2, 9.81], [0.01, 0.02, 0.03]).with_mag([-2.0e-6, 22.0e-6, -44.3e-6])), // the EKF's world field [T], level vehicle
             gps_data: Some([0.0, 0.0, 0.0]),
             uwb_data: Some([0.0, 0.0, 0.0]),
             chamber_pressure: Some(15.0),

@@ -79,8 +79,9 @@ impl Navigator {
         }
 
         // 3. Magnetometer update step to resolve yaw/attitude observability
-        if let Some(imu) = &sensor_data.imu_data {
-            let measurement = Array1::from(vec![imu.mag[0], imu.mag[1], imu.mag[2]]);
+        // Skipped for IMUs without a magnetometer.
+        if let Some(mag) = sensor_data.imu_data.as_ref().and_then(|imu| imu.mag) {
+            let measurement = Array1::from(vec![mag[0], mag[1], mag[2]]);
             let mag_world = RocketState::mag_world();
             let prediction = RocketState::mag_prediction(&self.ekf_es.nominal_state, &mag_world);
             let h = RocketState::mag_jacobian(&self.ekf_es.nominal_state, &mag_world);
