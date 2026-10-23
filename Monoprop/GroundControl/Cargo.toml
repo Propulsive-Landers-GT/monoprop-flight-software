@@ -9,7 +9,18 @@ postcard = { version = "1.0", features = ["use-std"] }
 anyhow = "1.0"
 crossbeam-channel = "0.5"
 optimization_engine = "0.6.0"
-ndarray = "0.15"
-ndarray-linalg = { version = "0.16", features = ["intel-mkl"] }
+serde_json = "1.0"
+toml = "0.8"
+rust_lossless = { git = "https://github.com/Propulsive-Landers-GT/guidance.git", rev = "a24ed790671ce951dd5198cac7a0af1fd154d166" }
+# Exact wire types used by the adjacent prototype flight computer.
+monoprop-common = { path = "../../../monoprop-prototype-software/common" }
 
-Common = { path = "../Common" }
+[dev-dependencies]
+monoprop-teensy41-firmware = { path = "../../../monoprop-prototype-software/teensy41-firmware" }
+
+[lib]
+name = "ground_control"
+
+[[bin]]
+name = "GroundControl"
+path = "src/main.rs"

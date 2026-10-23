@@ -25,3 +25,10 @@ Monoprop vehicle integration.
 
 Libraries this integrates: [`navigation`](../navigation), [`control`](../control), [`guidance`](../guidance), [`simulations`](../simulations).
 Hardware it runs on: [`monoprop-firmware`](../monoprop-firmware), [`monoprop-electronics`](../monoprop-electronics).
+
+## Prototype ground station
+
+See [Monoprop/GroundControl/README.md](Monoprop/GroundControl/README.md) for the
+ESP32/Teensy connection, startup commands, provisional vehicle configuration,
+Lossless/MPC integration and tests. Keep monoprop-prototype-software adjacent
+to this repository; ground imports its exact shared packet definitions.

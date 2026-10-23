@@ -35,3 +35,6 @@ Algorithms/MOC/Cargo.lock
 *.lock
 *.pyc
 *.mcap
+# Keep the ground application dependency graph reproducible.
+!Monoprop/Cargo.lock
+**/ground-session.jsonl

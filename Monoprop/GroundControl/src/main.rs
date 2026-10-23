@@ -1,472 +1,482 @@
-mod mpc_crate;
+use anyhow::{Context, Result, ensure};
+use crossbeam_channel::{bounded, unbounded};
+use ground_control::{
+    config::Config,
+    guidance::{self, Plan},
+    mpc_crate::{Mpc, N, setpoint},
+    protocol::{self, Sample},
+    station::Station,
+};
+use monoprop_common::{FlightPhase, TextCommand};
+use serde_json::json;
+use std::{
+    fs::OpenOptions,
+    io::{self, BufRead, Write},
+    net::UdpSocket,
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
-use mpc_crate::{mpc_main, dynamics};
-use ndarray::{Array1, Array2, s};
-use std::f64::consts::PI;
-use optimization_engine::panoc::PANOCCache;
+const HELP: &str = "\
+Vehicle commands: mission standard | mission hover | ready | arm | launch (go)
+                  hover | land | disarm | abort | kill
+Ground controls:  mpc on | mpc off | lossless on | lossless off
+                  solve mpc | solve lossless | status | reset | quit | help
+Startup: wait for modern navigation, mission hover, ready, arm, mpc on, launch.
+'kill' sends the vehicle kill command and keeps monitoring. 'quit' only stops
+ground streaming. 'reset' clears telemetry ordering after a vehicle reboot.
+Solves run without transmission until 'mpc on' and confirmed flying telemetry.";
 
-use std::process::Command;
-use std::thread;
-use std::net::UdpSocket;
-use std::time::{Duration, Instant};
-use crossbeam_channel::{bounded, Sender, Receiver};
-use Common::{DroneTelemetry, GroundCommand}; // Your shared structs
-
-use std::fs::File;
-use std::io::{self, Write, BufRead};
-
-// MPC Configuration Struct
-struct MPCConfig {
-    u_warm: Array2<f64>,
-    xref_traj_vec: Vec<Array1<f64>>,
-    q: Array2<f64>,
-    r: Array2<f64>,
-    qn: Array2<f64>,
-    smoothing_weight: Array1<f64>,
-    panoc_cache: PANOCCache,
+#[derive(Clone)]
+struct Job {
+    generation: u64,
+    sample: Sample,
+    target: [f64; 3],
+    plan: Option<Arc<Plan>>,
+    preview: bool,
 }
 
-enum ControlCommand {
-    Go,
-    Land,
-    Kill,
-}
-
-// Configuration
-const DRONE_IP: &str = "192.168.1.50:8888"; // IP of your ESP32
-const GROUND_PORT: &str = "0.0.0.0:9999";   // Port listening on PC
-
-fn main() -> anyhow::Result<()> {
-    // 1. Setup UDP Socket
-    let ground_port_num = GROUND_PORT
-    .split(':')
-    .nth(1)
-    .expect("Invalid address format")
-    .parse::<u16>()
-    .expect("Invalid port number");
-    force_clear_port(ground_port_num);
-    let socket = UdpSocket::bind(GROUND_PORT)?;
-    let socket_send = socket.try_clone()?;
-    
-    // Set a read timeout so the listener thread doesn't hang forever
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-
-    // 2. Channels for Thread Communication
-    // Telemetry: Network Thread -> MPC Thread  
-    let (telem_tx, telem_rx) = bounded::<DroneTelemetry>(5);
-
-    // Control Commands: Input Thread -> Main Thread
-    let (cmd_tx, cmd_rx) = bounded::<ControlCommand>(5);
-    
-    // 3. Spawn User Input Thread
-    thread::spawn(move || {
-        let stdin = io::stdin();
-        println!("Type 'go' to activate control, 'land' to command landing, or 'kill' to exit.");
-        for line in stdin.lock().lines() {
-            if let Ok(cmd) = line {
-                let cmd = cmd.trim().to_lowercase();
-                if cmd == "go" {
-                    let _ = cmd_tx.send(ControlCommand::Go);
-                    println!("Sending control commands!");
-                } else if cmd == "land" {
-                    let _ = cmd_tx.send(ControlCommand::Land);
-                    println!("Landing command issued.");
-                } else if cmd == "kill" {
-                    println!("Exiting program.");
-                    let _ = cmd_tx.send(ControlCommand::Kill);
-                    break;
-                }
+fn main() -> Result<()> {
+    let mut config_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ground.toml");
+    let mut bind_override = None;
+    let mut bridge_override = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => config_path = args.next().context("--config requires a path")?.into(),
+            "--bind" => {
+                bind_override = Some(args.next().context("--bind requires IP:port")?.parse()?)
             }
+            "--bridge" => {
+                bridge_override = Some(args.next().context("--bridge requires IP:port")?.parse()?)
+            }
+            "--help" | "-h" => {
+                println!(
+                    "GroundControl [--config PATH] [--bind IP:port] [--bridge IP:port]\n{HELP}"
+                );
+                return Ok(());
+            }
+            _ => anyhow::bail!("unknown argument {arg}"),
         }
-    });
-    
-    // 4. Spawn Network Listener Thread
+    }
+    let mut config = Config::load(&config_path)?;
+    if let Some(bind) = bind_override {
+        config.bind = bind;
+    }
+    if let Some(bridge) = bridge_override {
+        config.bridge = bridge;
+    }
+    ensure!(
+        !config.bridge.ip().is_unspecified() && config.bridge.port() != 0,
+        "bridge must be a concrete address"
+    );
+    let socket = UdpSocket::bind(config.bind).with_context(|| {
+        format!(
+            "bind {}; close another ground instance if this port is busy",
+            config.bind
+        )
+    })?;
+    socket.set_nonblocking(true)?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config.log_path)?;
+    let started = Instant::now();
+    let mut record = |event: serde_json::Value| -> Result<()> {
+        writeln!(
+            log,
+            "{}",
+            json!({"elapsed_s": started.elapsed().as_secs_f64(), "event": event})
+        )?;
+        log.flush()?;
+        Ok(())
+    };
+    record(
+        json!({"type":"session", "config":config_path, "bind":config.bind.to_string(), "bridge":config.bridge.to_string()}),
+    )?;
+    // A lone COBS delimiter is ignored by the Teensy, and lets a dynamic-IP
+    // ESP32 learn our IP without issuing an arm/ready/flight command.
+    socket.send_to(&[0], config.bridge)?;
+    println!(
+        "Listening on {}; ESP32 {}; log {}",
+        socket.local_addr()?,
+        config.bridge,
+        config.log_path
+    );
+    println!(
+        "Model: {:.3} kg, {:.2} N maximum thrust. Defaults are provisional.\n{HELP}",
+        config.vehicle.mass_kg, config.vehicle.max_thrust_n
+    );
+
+    let (input_tx, input_rx) = unbounded::<String>();
     thread::spawn(move || {
-        let mut buf = [0u8; 1024];
-        loop {
-            match socket.recv_from(&mut buf) {
-                Ok((size, _src)) => {
-                    // Deserialize bytes back into Struct
-                    if let Ok(telemetry) = postcard::from_bytes::<DroneTelemetry>(&buf[..size]) {
-                        // Send to main thread (overwrite old data if full)
-                        let _ = telem_tx.try_send(telemetry);
+        for line in io::stdin().lock().lines() {
+            match line {
+                Ok(line) => {
+                    if input_tx.send(line).is_err() {
+                        return;
                     }
                 }
-                Err(_) => { /* Handle timeout or error */ }
+                Err(_) => break,
+            }
+        }
+        let _ = input_tx.send("quit".into());
+    });
+    let (mpc_tx, mpc_rx) = bounded::<Job>(1);
+    let (mpc_result_tx, mpc_result_rx) = bounded(1);
+    let model = config.vehicle.clone();
+    thread::spawn(move || {
+        let mut solver = Mpc::new(model.clone());
+        let mut generation = None;
+        while let Ok(job) = mpc_rx.recv() {
+            if generation != Some(job.generation) {
+                solver = Mpc::new(model.clone());
+                generation = Some(job.generation);
+            }
+            let (refs, forces) = job
+                .plan
+                .as_ref()
+                .filter(|p| p.active_at(job.sample.nav.timestamp_us))
+                .map(|p| p.references(job.sample.nav.timestamp_us, &model))
+                .unwrap_or_else(|| (setpoint(job.target), [model.mass_kg * 9.81; N]));
+            let result = solver.solve(
+                &job.sample.state(),
+                &refs,
+                &forces,
+                job.sample.nav.timestamp_us,
+            );
+            if mpc_result_tx.send((job, result)).is_err() {
+                break;
+            }
+        }
+    });
+    let (guidance_tx, guidance_rx) = bounded::<Job>(1);
+    let (guidance_result_tx, guidance_result_rx) = bounded(1);
+    let model = config.vehicle.clone();
+    thread::spawn(move || {
+        while let Ok(job) = guidance_rx.recv() {
+            let result = guidance::solve(&model, &job.sample, job.target);
+            if guidance_result_tx.send((job, result)).is_err() {
+                break;
             }
         }
     });
 
-    println!("Ground Station Started. Waiting for drone...");
-
-    // 5. Main MPC Loop (Runs at e.g., 50Hz)
-    let mut sequence_id = 0;
-
-    // Define problem MPC parameters here
-    // Problem sizes
-    let n = 13; // [x, y, z, qx, qy, qz, qw, x_dot, y_dot, z_dot, wx, wy, wz]
-    let m = 3;  // [gimbal_theta, gimbal_phi, thrust]
-    let n_steps = 10; // MPC horizon 
-    let t_total = 20.0; // how many seconds for flight
-    let dt = 0.1; // prediction time step
-
-    // Initial state: at origin, level, stationary, quaternion [0,0,0,1]
-    let mut x = Array1::<f64>::zeros(n);
-    x[6] = 1.0; // qw = 1 (unit quaternion)
-
-    // Hover at set point
-    let hover_alt = 1.0;
-    let land_alt = 0.07;
-    let mut xref = Array1::<f64>::zeros(n);
-    xref[2] = hover_alt; // reference position: hover at 1m altitude
-    xref[6] = 1.0; // reference orientation: level (unit quaternion)
-
-    let mut z_integral = 0.0;
-    let mut y_integral = 0.0;
-    let mut x_integral = 0.0;
-    let ki_z = 0.2;
-    let ki_y = 0.01;
-    let ki_x = 0.01;
-
-    // Reference trajectory
-    let mut xref_traj = Array2::from_shape_fn((n_steps + 1, n), |(_, j)| xref[j]);
-    let mut xref_traj_vec: Vec<Array1<f64>> = xref_traj.axis_iter(ndarray::Axis(0)).map(|row| row.to_owned()).collect();
-
-    // Warm start: hover thrust (thrust = mass * gravity, gimbal angles = 0)
-    let mut m_rocket = 80.0;
-    let g = 9.81;
-    let hover_thrust = m_rocket * g;
-    let mut u_warm = Array2::<f64>::zeros((n_steps, m));
-    for i in 0..n_steps {
-        u_warm[[i, 2]] = hover_thrust; // thrust
-    }
-
-    // Costs: penalize position, orientation, velocities, angular rates
-    let q_vec = vec![
-        20.0, 20.0, 200.0,   // position x, y, z
-        0.0, 0.0, 0.0, 0.0, // quaternion qx, qy, qz, qw
-        3.0, 3.0, 1.0,        // linear velocities x_dot, y_dot, z_dot
-        1.0, 1.0, 1.0          // angular velocities wx, wy, wz
-    ];
-
-    let q = Array2::<f64>::from_diag(&Array1::from(q_vec.clone()));
-    let r = Array2::<f64>::from_diag(&Array1::from(vec![0000.0, 0000.0, 0.00]));
-    
-    // let qn = q.clone();
-    let qn = Array2::<f64>::from_diag(&Array1::from(vec![
-        200.0, 200.0, 5000.0,   // position x, y, z
-        10.0, 10.0, 10.0, 10.0, // quaternion qx, qy, qz, qw
-        10.0, 10.0, 10.0,        // linear velocities x_dot, y_dot, z_dot
-        5.0, 5.0, 5.0          // angular velocities wx, wy, wz
-    ]));
-
-    // Bounds on control inputs
-    // let gimbal_limit = 15.0 * PI / 180.0; // +/- 15 degrees
-    // let thrust_min = 300.0;
-    // let thrust_max = 1000.0;
-    // let u_min = Array1::from(vec![-gimbal_limit, -gimbal_limit, thrust_min]);
-    // let u_max = Array1::from(vec![gimbal_limit, gimbal_limit, thrust_max]);
-
-    // Store state and control history for plotting
-    let mut x_history = Vec::new();
-    let mut u_history: Vec<Array2<f64>> = Vec::new();
-
-    // PANOC parameters
-    let tolerance = 1e-4;
-    let lbfgs_memory = 20;
-    let max_iter = 200;
-    let n_dim_u = m * n_steps;
-    let mut panoc_cache = optimization_engine::panoc::PANOCCache::new(n_dim_u, tolerance, lbfgs_memory);
-
-    // smoothing weight vector (for gimbal_theta, gimbal_phi, thrust)
-    let smoothing_weight = Array1::from(vec![1500.0, 1500.0, 0.02]);
-
-    let mut mpc_config = MPCConfig {
-        u_warm,
-        xref_traj_vec,
-        q,
-        r,
-        qn,
-        smoothing_weight,
-        panoc_cache,
-    };
-
-    let mut last_timestamp: Option<Instant> = None;
-
-    let mut activated = false; // flag to indicate if we are sending control commands
-    let mut first_telem_received = false; // flag for first telemetry packet
-    let mut landing_initiated = false; // flag for landing sequence
-
+    let mut station = Station::default();
+    let mut plan: Option<(u64, Arc<Plan>)> = None;
+    let mut mpc_busy = false;
+    let mut guidance_busy = false;
+    let mut last_mpc = started;
+    let mut last_guidance = started;
+    let mut last_status = started;
+    let mut last_probe = started;
+    let mut last_sent_us = None;
+    let mut sequence = 0u32;
+    let mut received = 0u64;
+    let mut invalid = 0u64;
+    let mut ignored_peer = 0u64;
+    let mut reordered = 0u64;
+    let mut sent = 0u64;
+    let mut solve_status = String::from("idle");
+    let mut pending: Option<(TextCommand, Instant)> = None;
     loop {
-        let loop_start = Instant::now();
-
-        // A. Get Latest State
-        // Drain the channel to get the absolute newest packet
-        let mut latest_telem: Option<DroneTelemetry> = None;
-        while let Ok(t) = telem_rx.try_recv() {
-            latest_telem = Some(t);
-        }
-
-        // Check for control commands (non-blocking)
-        if let Ok(cmd) = cmd_rx.try_recv() {
-            match cmd {
-                ControlCommand::Go => {
-                    activated = true;
-                    landing_initiated = false;
-                    xref[2] = hover_alt;
-                    z_integral = 0.0;
-                    y_integral = 0.0;
-                    x_integral = 0.0;
-                    println!("✓ Control commands activated.");
-                }
-                ControlCommand::Land => {
-                    activated = true;
-                    landing_initiated = true;
-                    xref[2] = land_alt;
-                    z_integral = 0.0;
-                    y_integral = 0.0;
-                    x_integral = 0.0;
-                    println!("✓ Landing mode activated.");
-                }
-                ControlCommand::Kill => {
-                    activated = false;
-                    landing_initiated = false;
-                    println!("Exiting program.");
-                    break;
-                }
-            }
-        }
-
-        if let Some(telem) = latest_telem {
-            if !first_telem_received {
-                first_telem_received = true;
-                println!("✓ Telemetry received from drone!");
-                println!("Position: [{:.2}, {:.2}, {:.2}] m", telem.position[0], telem.position[1], telem.position[2]);
-                println!("\nType 'go' to start sending control commands, 'land' to command landing, or 'kill' to exit.");
-            }
-
-            if !activated {
-                continue; // Skip MPC until activated
-            }
-
-            // ============================================
-            // B. RUN YOUR MPC SOLVER HERE
-            // ============================================
-            // Input: telem and mpc_config
-            // Output: control sequence
-            
-            // store state data for post flight analysis
-            x[0] = telem.position[0] as f64;
-            x[1] = telem.position[1] as f64;
-            x[2] = telem.position[2] as f64;
-            x[3] = telem.orientation[0] as f64;  // qx
-            x[4] = telem.orientation[1] as f64;  // qy
-            x[5] = telem.orientation[2] as f64;  // qz
-            x[6] = telem.orientation[3] as f64;  // qw
-            x[7] = telem.velocity[0] as f64;
-            x[8] = telem.velocity[1] as f64;
-            x[9] = telem.velocity[2] as f64;
-            x[10] = telem.angular_vel[0] as f64;
-            x[11] = telem.angular_vel[1] as f64;
-            x[12] = telem.angular_vel[2] as f64;
-            x_history.push(x.clone());
-            
-            let now = Instant::now();
-            let dt = if let Some(prev_time) = last_timestamp {
-                now.duration_since(prev_time).as_secs_f64()
-            } else {
-                0.1 // default dt for first iteration
-            };
-            last_timestamp = Some(now);
-
-            let z_error = xref[2] - x[2];
-            z_integral += z_error * dt;
-            let mut x_ref_mod = xref.clone();
-            x_ref_mod[2] += ki_z * z_integral; // modify z reference with integral term
-            for i in 0..mpc_config.xref_traj_vec.len() {
-                mpc_config.xref_traj_vec[i][2] = x_ref_mod[2];
-            }
-            let x_error = xref[0] - x[0];
-            x_integral += x_error * dt;
-            x_ref_mod[0] += ki_x * x_integral; // modify x reference with integral term
-            for i in 0..mpc_config.xref_traj_vec.len() {
-                mpc_config.xref_traj_vec[i][0] = x_ref_mod[0];
-            }
-            let y_error = xref[1] - x[1];
-            y_integral += y_error * dt;
-            x_ref_mod[1] += ki_y * y_integral; // modify y reference with integral term
-            for i in 0..mpc_config.xref_traj_vec.len() {
-                mpc_config.xref_traj_vec[i][1] = x_ref_mod[1];
-            }
-
-            // Calculate the full control sequence
-            let mut u_control_seq = run_mpc_solver(&telem, &mut mpc_config);
-
-            // Exponential filter on control inputs
-            if let Some(u_prev) = u_history.last() {
-                let alpha = 0.4; // smoothing factor
-                u_control_seq = alpha * &u_control_seq + (1.0 - alpha) * u_prev;
-            }
-
-            // Push u_control_seq to history for filtering
-            u_history.push(u_control_seq.clone());
-
-            // Convert to fixed array sizes for sending
-            let mut thrust_seq: [f32; 10] = u_control_seq.slice(s![.., 2]).mapv(|v| v as f32).to_owned().as_slice().unwrap().try_into().unwrap();
-            let gimbal_theta_seq: [f32; 10] = u_control_seq.slice(s![.., 0]).mapv(|v| v as f32).to_owned().as_slice().unwrap().try_into().unwrap();
-            let gimbal_phi_seq: [f32; 10] = u_control_seq.slice(s![.., 1]).mapv(|v| v as f32).to_owned().as_slice().unwrap().try_into().unwrap();
-
-            if landing_initiated {
-                if telem.position[2] <= land_alt as f32 + 0.02f32 {
-                    println!("Scaling down thrust at altitude {:.2} m", telem.position[2]);
-                    
-                    // Scale down thrust from 100% to 0% of commanded value over 2 seconds
-                    // Track landing start time
-                    static LANDING_START: std::sync::Once = std::sync::Once::new();
-                    static mut LANDING_TIME: Option<Instant> = None;
-
-                    LANDING_START.call_once(|| {
-                        unsafe { LANDING_TIME = Some(Instant::now()); }
-                    });
-
-                    if let Some(start_time) = unsafe { LANDING_TIME } {
-                        let elapsed = start_time.elapsed().as_secs_f64();
-
-                        let mut scale_factor = 1.0;
-                        if elapsed < 2.0 {
-                            scale_factor = 1.0 - (elapsed / 2.0); // Linear scale from 1.0 to 0.0 over 2 seconds   
-                        } else {
-                            scale_factor = 0.0; // After 2 seconds, set to 0
-                            activated = false; // Deactivate control commands
-                            landing_initiated = false;
-                            println!("✓ Landing complete. Control commands deactivated.");
-                            break;
-                        };
-                        
-                        // Scale down all thrust values in the sequence
-                        for i in 0..thrust_seq.len() {
-                            thrust_seq[i] *= scale_factor as f32;
+        let now = Instant::now();
+        // Bounded drain keeps operator commands responsive under a packet flood.
+        // Read a complete UDP datagram before enforcing the bridge's 1024-byte cap.
+        // A smaller buffer returns WSAEMSGSIZE on Windows for an oversized packet.
+        let mut buffer = [0u8; 65535];
+        for _ in 0..256 {
+            match socket.recv_from(&mut buffer) {
+                Ok((len, peer)) if peer == config.bridge => {
+                    match protocol::decode_datagram(&buffer[..len], now) {
+                        Ok(samples) => {
+                            for sample in samples {
+                                if station.accept(sample) {
+                                    received += 1;
+                                    let sample = station.latest.as_ref().unwrap();
+                                    record(
+                                        json!({"type":"telemetry","navigation":sample.nav,"modern":sample.modern}),
+                                    )?;
+                                    if let Some((command, _)) = pending
+                                        && confirms(command, sample.phase())
+                                    {
+                                        println!(
+                                            "Vehicle phase confirmed: {:?}",
+                                            sample.phase().unwrap()
+                                        );
+                                        pending = None;
+                                        station.awaiting_phase = false;
+                                    }
+                                } else {
+                                    reordered += 1;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            invalid += 1;
+                            if invalid == 1 {
+                                eprintln!("Rejected telemetry: {error}");
+                            }
                         }
                     }
-                        
+                }
+                Ok(_) => ignored_peer += 1,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if station.mpc_enabled && !station.fresh(now, &config) {
+            station.stop();
+            plan = None;
+            eprintln!("Navigation stale: MPC transmission disabled; use 'mpc on' after recovery.");
+            record(json!({"type":"control_disabled","reason":"stale_navigation"}))?;
+        }
+        // Operator input is processed before worker results, so kill/off cannot
+        // be followed by a result already waiting in a channel.
+        while let Ok(input) = input_rx.try_recv() {
+            let input = input.trim().to_ascii_lowercase();
+            if input.is_empty() {
+                continue;
+            }
+            match input.as_str() {
+                "help" => println!("{HELP}"),
+                "status" => last_status = now - Duration::from_secs(2),
+                "quit" | "exit" => {
+                    station.stop();
+                    record(json!({"type":"quit","sent":sent,"received":received}))?;
+                    println!("Ground streaming stopped. Vehicle commands use kill/abort/land.");
+                    return Ok(());
+                }
+                "reset" => {
+                    station.reset();
+                    plan = None;
+                    last_sent_us = None;
+                    pending = None;
+                    println!("Telemetry ordering reset; streaming disabled.");
+                }
+                "mpc off" => {
+                    station.stop();
+                    plan = None;
+                    println!("MPC transmission disabled.");
+                }
+                "mpc on" => {
+                    if !station.fresh(now, &config)
+                        || station.latest.as_ref().and_then(Sample::phase).is_none()
+                    {
+                        eprintln!(
+                            "Need fresh modern navigation; legacy telemetry supports monitoring and previews only."
+                        );
+                    } else {
+                        station.invalidate();
+                        station.mpc_enabled = true;
+                        station.awaiting_phase = false;
+                        last_sent_us = None;
+                        println!("MPC enabled; transmission waits for a confirmed flying phase.");
+                    }
+                }
+                "lossless on" | "lossless off" => {
+                    station.lossless_enabled = input == "lossless on";
+                    station.invalidate();
+                    plan = None;
+                    println!("Lossless enabled: {}", station.lossless_enabled);
+                }
+                "solve mpc" | "solve lossless" => {
+                    if !station.fresh(now, &config) {
+                        eprintln!("Need fresh navigation for a preview.");
+                        continue;
+                    }
+                    let job = make_job(&station, &config, None, true);
+                    if input == "solve mpc" && !mpc_busy {
+                        mpc_tx.send(job)?;
+                        mpc_busy = true;
+                    } else if input == "solve lossless" && !guidance_busy {
+                        guidance_tx.send(job)?;
+                        guidance_busy = true;
+                    } else {
+                        eprintln!("Solver already busy.");
+                    }
+                }
+                _ => match protocol::text_command(&input) {
+                    Ok(command) => {
+                        if command == TextCommand::Launch
+                            && (!station.mpc_enabled
+                                || !station.fresh(now, &config)
+                                || station.latest.as_ref().and_then(Sample::phase)
+                                    != Some(FlightPhase::Armed))
+                        {
+                            eprintln!("Launch requires fresh Armed telemetry and 'mpc on'.");
+                            continue;
+                        }
+                        if matches!(
+                            command,
+                            TextCommand::Kill | TextCommand::Abort | TextCommand::Disarm
+                        ) {
+                            station.stop();
+                            plan = None;
+                        }
+                        if matches!(
+                            command,
+                            TextCommand::Launch | TextCommand::Land | TextCommand::Hover
+                        ) {
+                            station.invalidate();
+                            station.awaiting_phase = true;
+                            plan = None;
+                        }
+                        socket.send_to(&protocol::encode(&command)?, config.bridge)?;
+                        record(json!({"type":"command_sent","command":command}))?;
+                        println!("Sent {command:?}; UDP send is not an acknowledgement.");
+                        pending = Some((command, now));
+                    }
+                    Err(error) => eprintln!("{error}"),
+                },
+            }
+        }
+        if let Ok((job, result)) = guidance_result_rx.try_recv() {
+            guidance_busy = false;
+            match result {
+                Ok(new_plan) => {
+                    record(
+                        json!({"type":"lossless","preview":job.preview,"source_us":new_plan.start_us,
+                        "duration_s":new_plan.trajectory.time_of_flight_s,"positions":new_plan.trajectory.positions,
+                        "velocities":new_plan.trajectory.velocities,"specific_force":new_plan.trajectory.thrusts}),
+                    )?;
+                    if job.preview {
+                        println!(
+                            "Lossless preview solved: {:.2} s trajectory; no transmission.",
+                            new_plan.trajectory.time_of_flight_s
+                        );
+                    } else if job.generation == station.generation
+                        && station.fresh(now, &config)
+                        && new_plan.active_at(station.latest.as_ref().unwrap().nav.timestamp_us)
+                    {
+                        plan = Some((job.generation, Arc::new(new_plan)));
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Lossless: {error}; MPC uses the target setpoint when no valid trajectory exists."
+                    );
+                    record(json!({"type":"lossless_error","error":error.to_string()}))?;
                 }
             }
-
-            // C. Prepare Command
-            let cmd = GroundCommand {
-                seq_id: sequence_id,
-                thrust_seq: thrust_seq,
-                gimbal_theta_seq: gimbal_theta_seq,
-                gimbal_phi_seq: gimbal_phi_seq,
-            };
-
-            // D. Serialize and Send
-            let data = postcard::to_stdvec(&cmd)?;
-            socket_send.send_to(&data, DRONE_IP)?;
-            
-            sequence_id += 1;
         }
-
-        // Maintain Loop Rate (e.g., 50Hz = 20ms)
-        let elapsed = loop_start.elapsed();
-        if elapsed < Duration::from_millis(20) {
-            thread::sleep(Duration::from_millis(20) - elapsed);
-        }
-
-
-    }
-
-    // save x_history and u_history data to csv files
-        
-    // Save x_history as CSV
-    let mut x_file = File::create("x_history.csv")?;
-    writeln!(x_file, "x,y,z,qx,qy,qz,qw,vx,vy,vz,wx,wy,wz")?;
-    for state in &x_history {
-        writeln!(x_file, "{},{},{},{},{},{},{},{},{},{},{},{},{}", 
-            state[0], state[1], state[2], state[3], state[4], 
-            state[5], state[6], state[7], state[8], state[9],
-            state[10], state[11], state[12])?;
-    }
-
-    // Save u_history as CSV
-    let mut u_file = File::create("u_history.csv")?;
-    writeln!(u_file, "gimbal_theta,gimbal_phi,thrust")?;
-    for control_seq in &u_history {
-        for row in control_seq.axis_iter(ndarray::Axis(0)) {
-            writeln!(u_file, "{},{},{}", row[0], row[1], row[2])?;
-        }
-    }
-        
-        println!("Saved trajectory data to x_history.csv and u_history.csv");
-        
-        Ok(())
-}
-
-fn run_mpc_solver(telem: &DroneTelemetry, mpc_config: &mut MPCConfig) -> Array2<f64> {
-
-    // unpack telemetry into state vector x
-    let mut x = Array1::<f64>::zeros(13);
-
-    x[0] = telem.position[0] as f64;
-    x[1] = telem.position[1] as f64;
-    x[2] = telem.position[2] as f64;
-    x[3] = telem.orientation[0] as f64;  // qx
-    x[4] = telem.orientation[1] as f64;  // qy
-    x[5] = telem.orientation[2] as f64;  // qz
-    x[6] = telem.orientation[3] as f64;  // qw
-    x[7] = telem.velocity[0] as f64;
-    x[8] = telem.velocity[1] as f64;
-    x[9] = telem.velocity[2] as f64;
-    x[10] = telem.angular_vel[0] as f64;
-    x[11] = telem.angular_vel[1] as f64;
-    x[12] = telem.angular_vel[2] as f64;
-
-    // Call solver and return control actions
-    let (mut u_apply, u_warm) = mpc_crate::OpEnSolve(&x, &mpc_config.u_warm.axis_iter(ndarray::Axis(0)).map(|row| row.to_owned()).collect(), &mpc_config.xref_traj_vec, &mpc_config.q, &mpc_config.r, &mpc_config.qn, &mpc_config.smoothing_weight, &mut mpc_config.panoc_cache);
-
-    // Update warm start for next iteration
-    mpc_config.u_warm = u_warm.clone();
-
-    // Return the full control sequence (n_steps x m array)
-    u_warm
-}
-
-fn force_clear_port(port: u16) {
-    #[cfg(unix)] // Linux or MacOS
-    {
-        // 'fuser' command finds and kills processes on a port
-        // -k: kill, -n udp: namespace UDP
-        let _ = Command::new("fuser")
-            .arg("-k")
-            .arg("-n")
-            .arg("udp")
-            .arg(format!("{}", port))
-            .output(); // We ignore the result; if it fails, maybe port was already clear
-    }
-
-    #[cfg(windows)]
-    {
-        // 1. Find the PID using netstat
-        let output = Command::new("cmd")
-            .args(&["/C", &format!("netstat -ano | findstr :{}", port)])
-            .output()
-            .expect("Failed to execute netstat");
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        
-        // 2. Parse the PID (Last token in the line)
-        // Output looks like: "  UDP    0.0.0.0:9999       *:* 12345"
-        if let Some(line) = stdout.lines().next() {
-            if let Some(pid) = line.split_whitespace().last() {
-                // 3. Kill the PID
-                let _ = Command::new("taskkill")
-                    .args(&["/F", "/PID", pid])
-                    .output();
-                println!("Killed zombie process (PID: {}) on port {}", pid, port);
+        if let Ok((job, result)) = mpc_result_rx.try_recv() {
+            mpc_busy = false;
+            match result {
+                Ok(mut solution) => {
+                    solve_status = format!("{} {:.1} ms", solution.status, solution.elapsed_ms);
+                    if job.preview {
+                        println!(
+                            "MPC preview: {solve_status}, throttle {:.3}; no transmission.",
+                            solution.command.thrust_seq[0]
+                        );
+                    }
+                    let transmit = !job.preview
+                        && station.can_transmit(
+                            job.generation,
+                            &job.sample,
+                            Instant::now(),
+                            &config,
+                        );
+                    solution.command.seq_id = sequence;
+                    if transmit {
+                        socket.send_to(&protocol::encode(&solution.command)?, config.bridge)?;
+                        sequence = sequence.wrapping_add(1);
+                        sent += 1;
+                    }
+                    record(
+                        json!({"type":"mpc","source_us":job.sample.nav.timestamp_us,"transmitted":transmit,
+                        "status":solution.status,"elapsed_ms":solution.elapsed_ms,"cost":solution.cost,"command":solution.command}),
+                    )?;
+                }
+                Err(error) => {
+                    solve_status = error.to_string();
+                    record(json!({"type":"mpc_error","error":error.to_string()}))?;
+                }
             }
         }
+        if station.mpc_enabled && !station.awaiting_phase && station.fresh(now, &config) {
+            let sample = station.latest.as_ref().unwrap();
+            let flying = sample.phase().is_some_and(|p| p.is_flying());
+            if flying
+                && !mpc_busy
+                && now.duration_since(last_mpc).as_secs_f64() >= 1.0 / config.control_rate_hz
+                && last_sent_us != Some(sample.nav.timestamp_us)
+            {
+                let active_plan = plan
+                    .as_ref()
+                    .filter(|(g, p)| {
+                        *g == station.generation && p.active_at(sample.nav.timestamp_us)
+                    })
+                    .map(|(_, p)| p.clone());
+                mpc_tx.send(make_job(&station, &config, active_plan, false))?;
+                mpc_busy = true;
+                last_sent_us = Some(sample.nav.timestamp_us);
+                last_mpc = now;
+            }
+            if station.lossless_enabled
+                && flying
+                && sample.phase() != Some(FlightPhase::Hover)
+                && !guidance_busy
+                && now.duration_since(last_guidance).as_secs_f64() >= 1.0 / config.guidance_rate_hz
+            {
+                guidance_tx.send(make_job(&station, &config, None, false))?;
+                guidance_busy = true;
+                last_guidance = now;
+            }
+        }
+        if pending.is_some_and(|(_, t)| now.duration_since(t) > Duration::from_secs(2)) {
+            eprintln!(
+                "No phase confirmation for {:?}; inspect status. Mission mode and termination have no explicit acknowledgement in this protocol.",
+                pending.take().unwrap().0
+            );
+        }
+        if now.duration_since(last_status) >= Duration::from_secs(1) {
+            if let Some(s) = &station.latest {
+                println!(
+                    "nav={:?} age={}ms pos={:.3?} vel={:.3?} rx={received} tx={sent} bad={invalid} old={reordered} other={ignored_peer} mpc={} lossless={} solve={solve_status}",
+                    s.phase(),
+                    now.saturating_duration_since(s.received).as_millis(),
+                    s.nav.position,
+                    s.nav.velocity,
+                    station.mpc_enabled,
+                    station.lossless_enabled
+                );
+            } else {
+                println!(
+                    "Waiting for aligned navigation. Check BMI323/LiDAR, UART, Wi-Fi and ground IP. bad={invalid} other={ignored_peer}"
+                );
+            }
+            last_status = now;
+        }
+        if now.duration_since(last_probe) >= Duration::from_secs(1) {
+            socket.send_to(&[0], config.bridge)?;
+            last_probe = now;
+        }
+        thread::sleep(Duration::from_millis(2));
     }
-    
-    // Give the OS a moment to release the resource
-    thread::sleep(Duration::from_millis(500));
+}
+
+fn make_job(station: &Station, config: &Config, plan: Option<Arc<Plan>>, preview: bool) -> Job {
+    Job {
+        generation: station.generation,
+        sample: station.latest.as_ref().unwrap().clone(),
+        target: station.target(config),
+        plan,
+        preview,
+    }
+}
+
+fn confirms(command: TextCommand, phase: Option<FlightPhase>) -> bool {
+    match command {
+        TextCommand::Ready => phase == Some(FlightPhase::Ready),
+        TextCommand::Arm => phase == Some(FlightPhase::Armed),
+        TextCommand::Disarm => phase == Some(FlightPhase::Standby),
+        TextCommand::Launch => matches!(phase, Some(FlightPhase::Ascent | FlightPhase::Hover)),
+        TextCommand::Hover => phase == Some(FlightPhase::Hover),
+        TextCommand::Land => matches!(phase, Some(FlightPhase::Descent | FlightPhase::Landed)),
+        _ => false,
+    }
 }
