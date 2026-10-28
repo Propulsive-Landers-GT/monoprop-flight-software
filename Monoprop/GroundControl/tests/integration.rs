@@ -90,12 +90,13 @@ fn calibrated_horizon_reaches_teensy_with_ten_steps_and_correct_units() {
             let horizon = actual.to_default_mpc_sequence(2.0);
             let (i, applied) = horizon.command_at(2.42);
             assert_eq!(i, 4);
-            assert!((applied.thrust_norm - 5.0 / 12.0).abs() < 1e-6);
+            assert!((applied.thrust_norm - 5.0 / 16.0).abs() < 1e-6);
         }
         _ => panic!("wrong packet type"),
     }
     assert!(model.throttle(f64::NAN).is_err());
-    assert!(model.throttle(13.0).is_err());
+    assert_eq!(model.throttle(16.0).unwrap(), 1.0);
+    assert!(model.throttle(17.0).is_err());
 }
 
 #[test]
@@ -227,6 +228,9 @@ fn sensors(t: u64) -> SensorData {
             ..Default::default()
         }),
         lidar_range_m: Some(0.3),
+        // Already projected into the launch frame, as supplied by the GPS driver.
+        gps_data: Some([0.0; 3]),
+        gps_velocity_mps: Some([0.0; 3]),
         ..Default::default()
     }
 }
@@ -250,6 +254,9 @@ fn sensors_navigation_startup_solver_and_kill_use_the_actual_runtime() {
         .remove(0);
     assert!(decoded.nav.position[2].abs() < 0.01);
     assert_eq!(decoded.nav.orientation, [0.0, 0.0, 0.0, 1.0]);
+    let sensor_data = &decoded.modern.as_ref().unwrap().sensor_data;
+    assert_eq!(sensor_data.gps_data, Some([0.0; 3]));
+    assert_eq!(sensor_data.gps_velocity_mps, Some([0.0; 3]));
     for command in [
         TextCommand::MissionTetheredHover,
         TextCommand::Ready,

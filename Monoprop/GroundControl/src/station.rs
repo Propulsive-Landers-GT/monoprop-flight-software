@@ -48,6 +48,23 @@ impl Station {
         true
     }
 
+    /// Missing navigation must not prevent recovery of an unaligned estimator.
+    /// Reject a known fresh non-Standby phase; Teensy always enforces the gate.
+    pub fn prepare_ekf_reset(&mut self, now: Instant, config: &Config) -> bool {
+        if self.fresh(now, config)
+            && self
+                .latest
+                .as_ref()
+                .and_then(Sample::phase)
+                .is_some_and(|phase| phase != FlightPhase::Standby)
+        {
+            return false;
+        }
+        self.lossless_enabled = false;
+        self.reset();
+        true
+    }
+
     pub fn fresh(&self, now: Instant, config: &Config) -> bool {
         self.latest.as_ref().is_some_and(|s| {
             now.saturating_duration_since(s.received)

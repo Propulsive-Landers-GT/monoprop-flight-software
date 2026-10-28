@@ -2,7 +2,8 @@
 
 This is the ground half of the prototype flight loop:
 
-BMI323 + VL53L1 -> Teensy navigation/FSM -> UART -> ESP32 -> UDP ->
+BMI323 + M10 GPS (+ enabled optional sensors) -> Teensy navigation/FSM ->
+UART -> ESP32 -> UDP ->
 ground Lossless reference planning -> nonlinear MPC -> 10-step actuator horizon ->
 UDP -> ESP32 -> UART -> Teensy phase/interlock/actuator processing.
 
@@ -17,6 +18,7 @@ Keep these repositories adjacent:
 
 - monoprop-flight-software/
 - monoprop-prototype-software/
+- monoprop-firmware/ (ESP32 bridge firmware)
 
 The ground package imports the prototype's actual packet definitions through a
 relative Cargo dependency. Tests also exercise its real command parser, navigator
@@ -25,13 +27,15 @@ and runtime. No Intel MKL, BLAS or Python dependency is needed by the ground app
 From monoprop-flight-software/Monoprop:
 
     cargo test -p GroundControl --release
-    cargo run -p GroundControl --release
+    $espAddress = Read-Host "ESP32 IPv4 address printed on USB serial"
+    cargo run -p GroundControl --release -- --bridge "${espAddress}:8888"
 
 The default configuration is GroundControl/ground.toml (resolved relative to the
-package, independent of the process's working directory). Override it or the UDP
-addresses:
+package, independent of the process's working directory). The saved bridge
+address must match the ESP32's current DHCP address. Update `ground.toml` or
+override it with `--bridge` if that address changes. To also override the bind address:
 
-    cargo run -p GroundControl --release -- --config GroundControl/ground.toml --bind 0.0.0.0:9999 --bridge 192.168.1.50:8888
+    cargo run -p GroundControl --release -- --config GroundControl/ground.toml --bind 0.0.0.0:9999 --bridge "${espAddress}:8888"
 
 Use a release build for MPC. Runtime speed is enabled for GroundControl while
 embedded packages retain the workspace's size optimization. Logs append to
@@ -42,21 +46,31 @@ the process that owns it.
 
 ## ESP32 and wiring
 
-Verified against monoprop-firmware revision
-f3336ef4e977ad26b2dcb28cd0a847a896823c15,
-[esp32Firmware/src/main.cpp](https://github.com/Propulsive-Landers-GT/monoprop-firmware/blob/f3336ef4e977ad26b2dcb28cd0a847a896823c15/esp32Firmware/src/main.cpp):
+The local [ESP32 bridge firmware](../../../monoprop-firmware/esp32Firmware/src/main.cpp)
+and prototype Teensy firmware use the following configuration:
 
-- ESP32 address 192.168.1.50, listening UDP port 8888.
-- Ground destination 192.168.1.100, UDP port 9999 by default.
-- The ESP32 has fixed ground addressing by default. Give the laptop that address
-  on the field network, or rebuild the ESP32 with its actual address. Changing
-  only the ground bind address cannot change the ESP32 destination.
+- ESP32 uses DHCP on the connected router and listens on UDP 8888. Read its
+  numeric address from `[WiFi] connected IP=...` on USB serial at 115200 baud.
+- Ground stays on its normal LAN address and listens on UDP 9999. The ESP32
+  learns that address from the source IP of incoming ground packets.
+- Connect both devices to the same LAN. GroundControl's startup and periodic
+  delimiter heartbeat establishes the return address without arming. No
+  telemetry is forwarded until the ESP32 has received a ground packet.
+- Pass the assigned ESP32 address with `--bridge IP:8888`. If its DHCP address
+  changes, restart GroundControl with the new address. Run only the intended
+  ground sender because the latest accepted sender sets the return address.
 - Configure the ESP32's field-router SSID/password before use.
 - UART 115200 baud, 8N1, 3.3 V logic and common ground.
-- Prototype Teensy TX **pin 14** -> ESP32 RX GPIO16.
-- ESP32 TX GPIO17 -> prototype Teensy RX **pin 15**.
-- The ESP32 source comment mentioning Teensy pins 0/1 describes an older wiring
-  layout; those pins conflict with the prototype BMI323 SPI connection.
+- Prototype Teensy TX **pin 20** -> ESP32 header **RX (GPIO16)**.
+- ESP32 header **TX (GPIO17)** -> prototype Teensy RX **pin 22**.
+- The full Teensy flight binary receives on pin 22 and transmits on pin 20 using
+  separate FlexIO3 shifters/timers; `LPUART8` and pin 21 are unused.
+  LiDAR must remain disabled because its former XSHUT pin is now ESP32 RX.
+- Use the full Teensy `monoprop-flight-rx22-tx20.hex` image. An existing RX22/TX20
+  Teensy build needs no reflash for the ESP32 header change; its startup message
+  may still name the old ESP GPIO14/15 wiring. Build and flash the ESP32 configured
+  for RX16/TX17 using environment `featheresp32`; `featheresp32-echo` disables
+  Teensy UART forwarding.
 - Use the default MODE_DELIMITER packaging (zero-terminated postcard COBS).
   Idle-timeout/fixed-size packaging is not supported by this ground decoder.
 - Allow inbound UDP 9999 in the ground computer's firewall for the field network.
@@ -65,7 +79,7 @@ The bridge is transparent: every command datagram contains one complete COBS
 frame including its final zero. Telemetry can contain multiple complete frames;
 truncated, malformed, oversized, nonfinite and invalid-quaternion frames are
 rejected. Packets from other IP/port pairs are ignored. A lone zero sent on
-startup and once per second lets dynamic-ground-IP builds learn our address; the
+startup and once per second lets the bridge learn our address; the
 Teensy ignores it and it does not refresh its flight-command timeout.
 
 ## Prototype firmware
@@ -87,13 +101,30 @@ before returning to navigation. Both directions remain at the ESP32's 115200 bau
 Legacy telemetry is still decoded for monitoring and solver previews. Live
 streaming requires modern telemetry to observe the onboard flight phase.
 
-Keep the vehicle stationary during initial alignment: the prototype requires
-200 fresh stationary BMI323 samples and valid LiDAR ground samples (approximately
-two seconds at 100 Hz). No navigation telemetry is fabricated before alignment.
-If no packets arrive, check sensor readiness, the UART wiring, ESP32 diagnostic
-counters, ground IP and firewall. The current driver supplies one BMI323 and a
-VL53L1; it does not provide GPS or a magnetometer. Horizontal position and yaw
-therefore drift without additional aiding. Ground does not invent missing sensors.
+Keep the vehicle stationary during initial alignment: the current prototype
+requires 200 fresh stationary BMI323 samples (approximately two seconds at 100 Hz).
+Its compiled configuration enables the Holybro M10 GPS and disables LiDAR and
+magnetometer updates. If LiDAR is enabled, alignment also requires valid ground
+range samples. No navigation telemetry is fabricated before alignment.
+
+With GPS enabled, launch additionally requires a valid GPS origin and a fresh
+accepted fix; IMU alignment alone does not authorize launch. GPS TX connects to
+Teensy p28 and GPS RX to p29 (`LPUART7`), independently of the ESP32 link on
+p20 TX / p22 RX (FlexIO3). Navigation and telemetry use GPS position and velocity in
+the launch-relative frame, not raw latitude/longitude. Heading starts at the
+configured launch yaw while magnetometer aiding is disabled.
+
+The Teensy's USB `ESP link` diagnostic reports received bytes and decoded commands
+separately. The delimiter heartbeat should increment received bytes without
+decoding a command. This verifies the ESP32-to-Teensy direction; telemetry at
+the ground station verifies the reverse direction. The diagnostic should show
+`rx_pin=22 tx_pin=20`; the corrected mapping still needs an on-board test after
+installing the new Teensy build.
+
+If no packets arrive, check sensor readiness, UART wiring, ESP32 diagnostic
+counters, ground IP and firewall. If telemetry arrives but launch remains Armed,
+check GPS readiness and IMU freshness in the Teensy diagnostics. Ground does
+not fabricate missing sensors or bypass the onboard launch checks.
 
 ## Operator sequence
 
@@ -122,7 +153,7 @@ These margins avoid asymptotically hovering just short of a phase transition.
 Keep ground targets consistent with onboard limits; the protocol cannot change limits.
 
 Commands understood by the vehicle: ready, arm, disarm, launch (alias go), hover,
-land (alias descent), abort, kill, mission standard and mission hover.
+land (alias descent), abort, kill, mission standard, mission hover and ekf reset.
 The ground never sends startup commands automatically. Launch requires fresh
 Armed telemetry and enabled MPC. Land/hover/launch suspend horizon transmission
 until the new phase is observed, preventing an old solve from following a phase
@@ -137,6 +168,19 @@ command. If confirmation does not arrive, inspect status and retry the command.
 - lossless off returns MPC to a fixed target reference.
 - quit exits ground control; it does not issue a vehicle kill.
 - reset clears timestamp ordering after a vehicle reboot and disables streaming.
+- ekf reset requests onboard navigation reinitialization. GroundControl disables
+  MPC/Lossless, discards cached telemetry/plans and invalidates outstanding solver
+  results. Teensy accepts only in Standby/Auto with no latched termination; it
+  clears the EKF, learned biases/noise, GPS origin and queued control horizons.
+  Mission selection and the hardware clock are preserved. Keep the vehicle
+  stationary while fresh alignment and GPS-origin initialization run. Telemetry
+  pauses until alignment completes. This command does not change noise or
+  stationary thresholds, so it does not fix a failed stationary check by itself.
+  Teensy USB prints `EKF reset accepted` or `EKF reset rejected`; GroundControl
+  reports only that it sent the request, with no phase-based acknowledgement.
+  Missing/stale telemetry permits sending a recovery request; the onboard gate
+  remains authoritative. Both GroundControl and Teensy need this update; the
+  transparent ESP32 bridge needs no reflash.
 - status and help print local information.
 
 UDP send success means sent, not acknowledged. Modern phase telemetry confirms
@@ -182,11 +226,22 @@ horizon timeout and navigation/tilt interlocks remain authoritative.
 
 ## Provisional model and validation limits
 
-Per the requested lightweight-UAV assumptions, ground.toml starts with 0.7 kg,
-12 N combined maximum thrust, inertia [0.008,0.008,0.0035] kg*m^2 and a thrust
+ground.toml uses the reported approximate flight mass of 1.05 kg,
+16 N user-estimated combined maximum thrust and a thrust
 pivot 0.12 m below COM. It uses 15 degree per-axis gimbal limits and constant mass.
-These values and controller weights are not measured or flight tuned.
-The linear curve predicts roughly 57% hover throttle; actual propeller thrust
+Dry mass also equals 1.05 kg, matching the onboard electric-vehicle configuration.
+For this Monoprop, inertia assumes a uniform solid cylinder of height 22.5 inches
+(0.5715 m), diameter 6 inches (radius 0.0762 m), and mass 1.05 kg. About its center
+of mass, with body Z along the cylinder axis:
+
+- Ixx = Iyy = m*(3*r^2 + h^2)/12 = 0.030102762375 kg*m^2.
+- Izz = m*r^2/2 = 0.003048381 kg*m^2.
+- Products of inertia are zero by symmetry.
+
+These are the diagonal body-frame moments used by MPC, not moments about the TVC
+pivot. They are calculated from the requested uniform-cylinder assumption; other
+model parameters and controller weights remain provisional.
+The linear curve predicts about 10.3 N hover thrust and roughly 64% hover throttle; actual propeller thrust
 versus ESC command is not generally linear. Replace the curve and model from
 bench measurements before relying on free-flight performance.
 

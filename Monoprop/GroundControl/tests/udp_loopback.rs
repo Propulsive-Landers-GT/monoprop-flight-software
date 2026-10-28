@@ -23,7 +23,7 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
+fn ground_process_controls_stops_and_resets_ekf_through_udp_cobs() {
     let bridge = UdpSocket::bind("127.0.0.1:0").unwrap();
     bridge.set_nonblocking(true).unwrap();
     let directory =
@@ -53,6 +53,9 @@ fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
             ..Default::default()
         }),
         lidar_range_m: Some(0.3),
+        // Local GPS aiding keeps the real prototype launch gate ready.
+        gps_data: Some([0.0; 3]),
+        gps_velocity_mps: Some([0.0; 3]),
         ..Default::default()
     };
     for tick in 1..=220 {
@@ -67,6 +70,7 @@ fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
     let mut stage_at = started;
     let mut horizons = 0;
     let mut got_kill = false;
+    let mut got_ekf_reset = false;
     let mut after_kill = 0;
     let mut sent_preview = false;
     loop {
@@ -97,7 +101,16 @@ fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
                     ) {
                         got_kill = true;
                     }
+                    let resetting = matches!(
+                        command,
+                        LinkCommand::Text(monoprop_common::TextCommand::ResetEkf)
+                    );
                     runtime.handle_link_command(command, now_s);
+                    if resetting {
+                        assert_eq!(runtime.core().state().flight_phase, FlightPhase::Standby);
+                        assert!(!runtime.core().navigator().is_aligned());
+                        got_ekf_reset = true;
+                    }
                 }
             }
         }
@@ -153,6 +166,17 @@ fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
                     runtime.core().state().last_command,
                     ActuatorCommand::default()
                 );
+                writeln!(input, "ekf reset").unwrap();
+                stage = 6;
+                stage_at = Instant::now();
+            }
+            6 if got_ekf_reset && runtime.core().navigator().is_aligned() => {
+                assert_eq!(after_kill, 0);
+                assert_eq!(phase, FlightPhase::Standby);
+                assert_eq!(
+                    runtime.core().state().last_command,
+                    ActuatorCommand::default()
+                );
                 writeln!(input, "quit").unwrap();
                 break;
             }
@@ -166,5 +190,6 @@ fn ground_process_controls_through_udp_cobs_and_stops_after_kill() {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(sent_preview);
+    assert!(got_ekf_reset);
     assert!(horizons >= 3);
 }

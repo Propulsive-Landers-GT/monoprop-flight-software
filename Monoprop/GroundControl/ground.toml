@@ -1,7 +1,7 @@
 # PROVISIONAL lightweight electric UAV model, not measured or flight validated.
 # Body: x forward, y left, z up. Navigation: launch-relative, z up.
 bind = "0.0.0.0:9999"
-bridge = "192.168.1.50:8888"
+bridge = "10.91.156.244:8888"
 telemetry_timeout_ms = 250
 result_max_age_ms = 100
 control_rate_hz = 20.0
@@ -14,14 +14,20 @@ landing_position_m = [0.0, 0.0, 0.0]
 log_path = "ground-session.jsonl"
 
 [vehicle]
-mass_kg = 0.7
-dry_mass_kg = 0.55
-inertia_kg_m2 = [0.008, 0.008, 0.0035]
+# User-reported approximate flight mass; matches the onboard vehicle config.
+mass_kg = 1.05
+# Electric vehicle: constant mass, no consumable propellant.
+dry_mass_kg = 1.05
+# Monoprop only: uniform solid cylinder, m=1.05 kg, h=22.5 in=0.5715 m, d=6 in.
+# Principal moments about COM; body Z is the cylinder/thrust axis, r=0.0762 m.
+# Ixx=Iyy=m*(3*r^2+h^2)/12; Izz=m*r^2/2; products of inertia are zero.
+inertia_kg_m2 = [0.030102762375, 0.030102762375, 0.003048381]
 thrust_pivot_z_m = -0.12
 min_thrust_n = 0.0
-max_thrust_n = 12.0
+# User-estimated combined maximum for the stacked propellers.
+max_thrust_n = 16.0
 # Replace with measured dual-prop thrust versus normalized ESC command.
-thrust_curve = [[0.0, 0.0], [1.0, 12.0]]
+thrust_curve = [[0.0, 0.0], [1.0, 16.0]]
 gimbal_limit_deg = 15.0
 fuel_burn_kg_per_ns = 0.0
 mpc_budget_ms = 30

@@ -21,12 +21,13 @@ use std::{
 
 const HELP: &str = "\
 Vehicle commands: mission standard | mission hover | ready | arm | launch (go)
-                  hover | land | disarm | abort | kill
+                  hover | land | disarm | abort | kill | ekf reset
 Ground controls:  mpc on | mpc off | lossless on | lossless off
                   solve mpc | solve lossless | status | reset | quit | help
 Startup: wait for modern navigation, mission hover, ready, arm, mpc on, launch.
 'kill' sends the vehicle kill command and keeps monitoring. 'quit' only stops
 ground streaming. 'reset' clears telemetry ordering after a vehicle reboot.
+'ekf reset' requests onboard realignment in Standby and disables both solvers.
 Solves run without transmission until 'mpc on' and confirmed flying telemetry.";
 
 #[derive(Clone)]
@@ -300,6 +301,23 @@ fn main() -> Result<()> {
                 }
                 _ => match protocol::text_command(&input) {
                     Ok(command) => {
+                        if command == TextCommand::ResetEkf {
+                            if !station.prepare_ekf_reset(now, &config) {
+                                eprintln!(
+                                    "EKF reset requires Standby; disarm first and wait for Standby telemetry."
+                                );
+                                continue;
+                            }
+                            plan = None;
+                            last_sent_us = None;
+                            pending = None;
+                            socket.send_to(&protocol::encode(&command)?, config.bridge)?;
+                            record(json!({"type":"command_sent","command":command}))?;
+                            println!(
+                                "EKF reset sent; MPC/Lossless disabled. Teensy requires Standby in Auto mode. Check Teensy USB for acceptance; keep stationary for alignment and GPS origin. UDP send is not an acknowledgement."
+                            );
+                            continue;
+                        }
                         if command == TextCommand::Launch
                             && (!station.mpc_enabled
                                 || !station.fresh(now, &config)

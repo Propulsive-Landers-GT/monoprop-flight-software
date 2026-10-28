@@ -101,6 +101,7 @@ pub fn text_command(input: &str) -> Result<TextCommand> {
         "land" | "descent" => TextCommand::Land,
         "abort" => TextCommand::Abort,
         "kill" => TextCommand::Kill,
+        "ekf reset" => TextCommand::ResetEkf,
         "mission standard" | "mission full" | "standard" | "mission_standard" => {
             TextCommand::MissionStandard
         }
