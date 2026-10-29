@@ -30,6 +30,14 @@ impl RcsController {
         }
     }
 
+    /// Recompute hysteresis and command for a new starting state, preserving tuning.
+    pub fn initialize(&mut self, roll_angle: f64, roll_rate: f64, now: f64) {
+        self.in_deadband = false;
+        self.last_command = 0.0;
+        self.last_update = now - self.update_period;
+        self.update(roll_angle, roll_rate, now);
+    }
+
     pub fn update(&mut self, roll_angle: f64, roll_rate: f64, now: f64) -> f64 {
         if now - self.last_update >= self.update_period - 1e-6 {
             self.last_update = now;

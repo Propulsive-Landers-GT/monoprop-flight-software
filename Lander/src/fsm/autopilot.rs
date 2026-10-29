@@ -39,7 +39,7 @@ impl Autopilot {
         guidance: Box<dyn GuidancePlanner>,
         controller: Box<dyn Controller>,
     ) -> Self {
-        let previous_control = vec![Array1::from(vec![0.0, 0.0, 80.0 * 9.81]); 10];
+        let previous_control = vec![Array1::from(vec![0.0, 0.0, 80.0 * 9.81]); controller.get_horizon_steps()];
         Self {
             navigator,
             guidance,
@@ -66,6 +66,31 @@ impl Autopilot {
 
     pub fn navigator_mut(&mut self) -> &mut dyn crate::algorithms::Navigator {
         self.navigator.as_mut()
+    }
+
+    pub fn guidance_mut(&mut self) -> &mut dyn GuidancePlanner {
+        self.guidance.as_mut()
+    }
+
+    pub fn controller_mut(&mut self) -> &mut dyn Controller {
+        self.controller.as_mut()
+    }
+
+    pub fn ekf_mut(&mut self) -> Option<&mut navigator::Navigator> {
+        (self.navigator.as_mut() as &mut dyn std::any::Any).downcast_mut()
+    }
+
+    pub fn lossless_mut(&mut self) -> Option<&mut Lossless> {
+        (self.guidance.as_mut() as &mut dyn std::any::Any).downcast_mut()
+    }
+
+    /// Seed the MPC warm start at the current horizon length and discard built-in solver history.
+    /// Custom controllers can reset their internal history through `controller_mut`.
+    pub fn reset_control(&mut self, control: [f64; 3], mass: f64, now: f64) {
+        self.previous_control = vec![Array1::from(control.to_vec()); self.controller.get_horizon_steps()];
+        if let Some(mpc) = self.mpc_mut() {
+            mpc.reset(mass, now);
+        }
     }
 
     pub fn update_navigator(&mut self, state: &mut ControlLoopState, sensor_data: &SensorData, now: f64, dt: f64) -> bool {

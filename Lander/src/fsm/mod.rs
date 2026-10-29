@@ -1,5 +1,6 @@
-use crate::state::{SensorData, FlightPhase, ControlLoopState, ControlMode, FlightLimits, JogSetpoint};
+use crate::state::{SensorData, VehicleState, FlightPhase, ControlLoopState, ControlMode, FlightLimits, JogSetpoint};
 use crate::state::{JOG_TIMEOUT_S, JOG_MAX_GIMBAL_RAD, JOG_MAX_THRUST_N, IMU_TIMEOUT_S};
+use crate::state::PropulsionParameters;
 use crate::algorithms::{Navigator, GuidancePlanner, Controller};
 use ndarray::{Array1, Array2};
 
@@ -18,6 +19,7 @@ pub struct FlightStateMachine {
     state: ControlLoopState,
     goal: [f64; 3],
     limits: FlightLimits,
+    propulsion: PropulsionParameters,
 }
 
 impl FlightStateMachine {
@@ -29,6 +31,7 @@ impl FlightStateMachine {
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0], // The ascent target. The descent targets the origin [0.0, 0.0, 0.0] as the landing pad.
             limits: FlightLimits::default(),
+            propulsion: PropulsionParameters::default(),
         }
     }
     
@@ -37,31 +40,92 @@ impl FlightStateMachine {
         guidance: Box<dyn GuidancePlanner>,
         controller: Box<dyn Controller>,
     ) -> Self {
+        let propulsion = PropulsionParameters::default();
+        let mut autopilot = Autopilot::new_with_algorithms(navigator, guidance, controller);
+        if let Some(lossless) = autopilot.lossless_mut() {
+            lossless.alpha = propulsion.alpha();
+        }
         Self {
-            autopilot: Autopilot::new_with_algorithms(navigator, guidance, controller),
+            autopilot,
             actuator_controller: ActuatorController::new(),
             scheduler: Scheduler::new(500.0, 1.0, 50.0),
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0],
             limits: FlightLimits::default(),
+            propulsion,
         }
+    }
+
+    pub fn propulsion_parameters(&self) -> PropulsionParameters {
+        self.propulsion
+    }
+
+    /// Configure consumption before starting a run. Updates the built-in guidance coefficient
+    /// as well as mass depletion; use this instead of editing `Lossless::alpha` directly.
+    /// Custom guidance planners must be configured separately. Existing trajectories are retained.
+    pub fn set_propulsion_parameters(&mut self, parameters: PropulsionParameters) -> Result<(), String> {
+        if !parameters.specific_impulse_s.is_finite() || parameters.specific_impulse_s <= 0.0 {
+            return Err("specific impulse must be finite and positive [s]".to_string());
+        }
+        let alpha = parameters.alpha();
+        if !alpha.is_finite() || alpha <= 0.0 {
+            return Err("specific impulse must yield a finite, positive consumption coefficient".to_string());
+        }
+        if let Some(lossless) = self.autopilot.lossless_mut() {
+            lossless.alpha = alpha;
+        }
+        self.propulsion = parameters;
+        Ok(())
     }
     
     pub fn initialize(&mut self) {
-        self.state.start_time = 0.0;
-        self.state.last_sensor_update = 0.0;
-        self.state.last_navigation_update = 0.0;
-        self.state.last_mpc_update = 0.0;
-        self.state.last_state_time = 0.0;
-        self.state.last_position_update = 0.0;
-        self.state.last_valid_imu_sample = None;
-        self.state.last_valid_imu_time = 0.0;
-        self.state.imu_rejecting = false;
-        self.state.mass = 80.0;
-        self.state.flight_terminated = false;
-        self.state.flight_phase = FlightPhase::Standby;
-
+        self.initialize_with_state(VehicleState::default(), 0.0);
         println!("Flight State Machine initialized");
+    }
+
+    /// Start a fresh run in Standby at `now` (in the same clock as sensor timestamps).
+    /// Seeds navigation with default covariance/noise and zero biases, clears old trajectories,
+    /// and resets control history. Algorithm tuning and flight limits are retained.
+    /// Call `set_flight_phase` afterwards to start in flight; use `inject_state` afterwards
+    /// for custom EKF biases/covariance/noise. Custom navigators must accept the 16D rocket state.
+    ///
+    /// ```
+    /// use Lander::{fsm::FlightStateMachine, state::VehicleState};
+    /// let mut fsm = FlightStateMachine::new();
+    /// let mut initial = VehicleState::default();
+    /// initial.position.z = 30.0;
+    /// fsm.initialize_with_state(initial, 0.0);
+    /// fsm.autopilot_mut().lossless_mut().unwrap().upper_thrust_bound = 1100.0;
+    /// fsm.rcs_mut().kp = 15.0;
+    /// ```
+    pub fn initialize_with_state(&mut self, vehicle_state: VehicleState, now: f64) {
+        let mut navigator = crate::algorithms::navigator::Navigator::new();
+        navigator.initialize(&vehicle_state);
+        let ekf = navigator.ekf_es;
+        self.autopilot.navigator_mut().inject_state(ekf.nominal_state, ekf.error_covariance, ekf.process_noise);
+        let mass = vehicle_state.mass;
+        self.state = ControlLoopState {
+            vehicle_state,
+            mass,
+            sensor_fusion_state: self.autopilot.navigator_mut().get_state_vector(),
+            start_time: now,
+            last_sensor_update: now,
+            last_navigation_update: now,
+            last_mpc_update: now,
+            last_state_time: now,
+            last_position_update: now,
+            last_valid_imu_time: now,
+            trajectory_generation_time: now,
+            last_thrust: mass * 9.81,
+            ..ControlLoopState::default()
+        };
+        self.autopilot.set_flight_phase(FlightPhase::Standby);
+        self.autopilot.reset_control([0.0, 0.0, mass * 9.81], mass, now);
+        let (_, _, roll) = self.state.vehicle_state.attitude.euler_angles();
+        let roll_rate = self.state.vehicle_state.angular_velocity.z;
+        let rcs = self.actuator_controller.rcs_mut();
+        rcs.initialize(roll, roll_rate, now);
+        self.state.last_rcs_command = rcs.last_command;
     }
     
     pub fn arm(&mut self, now: f64) {
@@ -368,13 +432,12 @@ impl FlightStateMachine {
         }
         
         // Mass depletion model (based on last_thrust from operator / MPC and actual elapsed sensor_dt)
-        if self.state.flight_phase == FlightPhase::Standby || self.state.flight_phase == FlightPhase::Armed {
-            self.state.mass = 80.0;
-        } else if self.state.flight_phase != FlightPhase::Landed && sensor_fusion_due {
-            let mass_flow = self.state.last_thrust / (180.0 * 9.81);
+        if matches!(self.state.flight_phase, FlightPhase::Ascent | FlightPhase::Hover | FlightPhase::Descent) && sensor_fusion_due {
+            let mass_flow = self.propulsion.mass_flow_rate(self.state.last_thrust);
             self.state.mass -= mass_flow * sensor_dt;
-            self.state.mass = self.state.mass.max(50.0);
+            self.state.mass = self.state.mass.max(self.state.vehicle_state.dry_mass);
         }
+        self.state.vehicle_state.mass = self.state.mass;
         
         // Run termination check on the freshest state (after sensor fusion update)
         if let Some(reason) = self.check_flight_termination(sensor_data, now) {
@@ -517,5 +580,9 @@ impl FlightStateMachine {
 
     pub fn autopilot_mut(&mut self) -> &mut autopilot::Autopilot {
         &mut self.autopilot
+    }
+
+    pub fn rcs_mut(&mut self) -> &mut crate::algorithms::rcs::RcsController {
+        self.actuator_controller.rcs_mut()
     }
 }
