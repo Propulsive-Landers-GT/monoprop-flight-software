@@ -5,6 +5,10 @@ pub struct ActuatorController {
 }
 
 impl ActuatorController {
+    pub fn rcs_mut(&mut self) -> &mut crate::algorithms::rcs::RcsController {
+        &mut self.rcs_controller
+    }
+
     pub fn new() -> Self {
         Self {
             rcs_controller: crate::algorithms::rcs::RcsController::new(),

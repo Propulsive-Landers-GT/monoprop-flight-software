@@ -88,6 +88,33 @@ pub const JOG_MAX_THRUST_N: f64 = 1200.0;
 /// tick must not end the flight. Within this window the last valid sample is held.
 pub const IMU_TIMEOUT_S: f64 = 1.0;
 
+/// Reference acceleration for specific impulse in seconds, not local vehicle gravity.
+pub const STANDARD_GRAVITY_M_S2: f64 = 9.80665;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropulsionParameters {
+    /// Engine specific impulse [s].
+    pub specific_impulse_s: f64,
+}
+
+impl Default for PropulsionParameters {
+    fn default() -> Self {
+        Self { specific_impulse_s: 180.0 }
+    }
+}
+
+impl PropulsionParameters {
+    /// Propellant consumption per unit impulse [kg / (N s)].
+    pub fn alpha(&self) -> f64 {
+        1.0 / (self.specific_impulse_s * STANDARD_GRAVITY_M_S2)
+    }
+
+    /// Propellant consumption rate [kg/s] for a non-negative thrust magnitude [N].
+    pub fn mass_flow_rate(&self, thrust_n: f64) -> f64 {
+        thrust_n * self.alpha()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VehicleState {
     pub position: Vector3<f64>,

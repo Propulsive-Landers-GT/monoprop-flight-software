@@ -114,6 +114,15 @@ impl MPC {
         }
     }
 
+    /// Clear solver history after changing the starting state or horizon, preserving tuning.
+    pub fn reset(&mut self, mass: f64, now: f64) {
+        self.mass = mass;
+        self.system_time = now;
+        self.last_solve_time = now;
+        self.reset_warm_start = true;
+        self.panoc_cache = optimization_engine::panoc::PANOCCache::new(self.m * self.n_steps, 1e-4, 20);
+    }
+
     pub fn set_manual_weights(
         &mut self,
         use_manual: bool,

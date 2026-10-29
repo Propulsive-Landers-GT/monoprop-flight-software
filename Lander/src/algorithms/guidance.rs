@@ -1,4 +1,5 @@
 use super::GuidancePlanner;
+use crate::state::PropulsionParameters;
 
 #[allow(dead_code)]
 pub struct Lossless {
@@ -21,7 +22,7 @@ impl Lossless {
     pub fn new() -> Self {
         let max_velocity = 50.0;
         let dry_mass = 61.0;
-        let alpha = 1.0 / (9.81 * 180.0);
+        let alpha = PropulsionParameters::default().alpha();
         let lower_thrust_bound = 300.0;
         let upper_thrust_bound = 1000.0;
         let tvc_range_rad = 15_f64.to_radians();

@@ -108,8 +108,22 @@ impl Navigator {
         })
     }
 
-    fn inject_state(&mut self, initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) {
-        // 🚀 MAP TO THE CORRECT STRUCT FIELDS 🚀
+    /// Seed position, velocity and attitude; reset biases and covariance to their defaults.
+    /// Process noise is preserved. Use `inject_state` for custom biases, covariance and noise.
+    pub fn initialize(&mut self, state: &VehicleState) {
+        let quat = state.attitude.quaternion();
+        let nominal = Array1::from(vec![
+            state.position.x, state.position.y, state.position.z,
+            state.velocity.x, state.velocity.y, state.velocity.z,
+            quat.w, quat.i, quat.j, quat.k,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]);
+        self.inject_state(nominal, RocketState::initial_covariance(), self.ekf_es.process_noise.clone());
+    }
+
+    /// Nominal state is 16D [position, velocity, quaternion (w,x,y,z), accel bias, gyro bias].
+    /// Covariance and discrete process noise are 15x15 error-state matrices.
+    pub fn inject_state(&mut self, initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) {
         self.ekf_es.nominal_state = initial_nominal;
         self.ekf_es.error_covariance = initial_p;
         self.ekf_es.process_noise = q;
@@ -120,6 +134,10 @@ impl Navigator {
 }
 
 impl super::Navigator for Navigator {
+    fn inject_state(&mut self, initial_nominal: Array1<f64>, initial_p: Array2<f64>, q: Array2<f64>) {
+        self.inject_state(initial_nominal, initial_p, q);
+    }
+
     fn update(&mut self, sensor_data: &SensorData, dt: f64, in_prelaunch: bool) -> Option<VehicleState> {
         self.update(sensor_data, dt, in_prelaunch)
     }
