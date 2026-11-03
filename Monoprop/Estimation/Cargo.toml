@@ -1,24 +1,16 @@
 [package]
 name = "Estimation"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.87"
-description = "State estimation (Matrix tools and ring buffer, Rotations, IMU, strapdown and noise, ES-EKF flight filter), no_std, f64"
+description = "Bare-metal error-state Kalman filter (IMU + position + magnetometer + height), no_std, f64"
 publish = false
 
 [lib]
 path = "src/lib.rs"
-test = false     # the tests are in tests/ (one program, below)
 doctest = false
 
 [dependencies]
 # Same nalgebra as Drone/Cargo.toml, so the filter's vectors and the firmware's are the same types.
 # no_std: no default features; libm provides sqrt/sin/cos/atan2 without the standard library.
 nalgebra = { version = "0.34", default-features = false, features = ["libm"] }
-
-# One test program runs every course test against this crate (host only, uses std):
-#   cargo test -p Estimation
-[[test]]
-name = "all"
-path = "tests/all.rs"
-harness = false

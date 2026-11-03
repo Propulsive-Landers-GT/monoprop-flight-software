@@ -1,35 +1,28 @@
 # Estimation
 
-A 15-state error-state Kalman filter (ESEKF) for the monoprop vehicle: it fuses the IMU with position fixes (UWB or GPS), a magnetometer and height (barometer or lidar), and estimates position, velocity, attitude, accelerometer bias and gyro bias.
-`#![no_std]`, no heap, f64 throughout (the Teensy 4.1's Cortex-M7 has a double-precision FPU), built on
-nalgebra fixed-size matrices (same version as `Drone`).
+The bare-metal error-state Kalman filter (ES-EKF) for the monoprop vehicle: it fuses the IMU with position
+fixes (UWB or GPS), a magnetometer and height (barometer or lidar), and estimates position, velocity,
+attitude, accelerometer bias and gyro bias. `#![no_std]`, no heap, f64, nalgebra fixed-size matrices
+(same version as `Drone`).
 
-## Layout (dependency order)
+The filter code is the same as `AttitudeEstimation/rust-ekf/src/bare_es_ekf/` in the navigation repository,
+where it serves as the template for new estimators; here its modules sit at the crate root.
 
-| Module | What it does |
+| File | What it is |
 |---|---|
-| `src/env.rs` | Gravity, magnetic field reference, IMU noise model (VN-200 datasheet values). **Set these for the vehicle.** |
-| `src/linalg/` | Matrix helpers on nalgebra fixed-size types. `basics`: diag and outer products; `skew`: the cross-product matrix skew(v); `blocks`: reading and writing 3x3 blocks of larger matrices; `spd`: symmetrising a matrix and checking positive definiteness; `cholesky`: Cholesky factorisation L L^T; `solve`: solving S x = b with Cholesky (no explicit inverse). |
-| `src/quat/` | Quaternions and rotation matrices. `product`: Hamilton product and the rotation matrix R(q); `quat_exp_log`: Exp and Log maps for quaternions; `so3_exp_log`: Exp and Log maps for rotation matrices. |
-| `src/rot/` | Small rotations (perturbations) and their Jacobians. `perturbation`: boxplus / boxminus and gyro integration. |
-| `src/nominal/` | The nominal state, strapdown propagation, and the error state. `strapdown`: the nominal state and strapdown propagation; `error_state`: inject / difference between the nominal state and the 15-number error state. |
-| `src/noise/` | IMU noise models. `units`: IMU noise units: density to per-sample sigma, random-walk steps. |
-| `src/errprop/` | Error-state propagation: F and Q. `transition`: the error-state transition matrix F; `process_noise`: the process noise Q. |
-| `src/esekf/` | The 15-state error-state Kalman filter. `filter`: the Esekf struct and predict; `models`: position and magnetometer measurement models and Jacobians; `update`: the generic gated update with injection and covariance reset; `sensors`: position (GPS / UWB) and magnetometer updates; `height`: height (barometer / downward lidar) updates. |
-| `src/align/` | Start-up: TRIAD alignment and the initial covariance. `triad`: TRIAD: attitude from one accelerometer and one magnetometer reading; `start`: initial covariance and align (building the filter from the first readings). |
+| `src/math.rs` | Linear algebra and rotation helpers. |
+| `src/model.rs` | `BareESEKFModel`: what a vehicle/sensor model provides. |
+| `src/filter.rs` | `BareESEKF<Model, E>`: predict, gated update, injection, covariance reset. |
+| `src/full_state.rs` | `FullState`: the 15-state INS model (IMU, position, magnetometer, height), TRIAD alignment, VN-200 noise, environment constants. |
 | `src/interop.rs` | f32 conversions for the Drone software and `Common::DroneTelemetry`. |
-| `tests/` | Host-only: unit tests for every file, a flight simulator, fault scenarios and whole-filter flights checked for consistency (NEES). |
-
-Everything is re-exported from the crate root (`use Estimation::*;`).
+| `src/system_test.rs` | The system test: simulated flights with faults (`cargo test -p Estimation`). |
 
 ## Build and test (from `Monoprop/`)
 
 ```text
-cargo test -p Estimation                                        # every test, on the PC
-cargo build -p Estimation --lib --target thumbv7em-none-eabihf  # proves it still builds for the Teensy
+cargo test -p Estimation -- --nocapture                    # the system test, on the PC (about a minute)
+cargo build -p Estimation --lib --target thumbv7em-none-eabihf
 ```
-
-Run both before every push that touches this crate.
 
 ## Using it
 
@@ -37,30 +30,22 @@ Run both before every push that touches this crate.
 use Estimation::*;
 
 // IMU noise: the VN-200 datasheet model at its sample rate (replace with Allan-deviation values later)
-let imu_spec = ImuSpec::vn200(200.0);
+let model = FullState::new(ImuSpec::vn200(200.0));
 
-// start-up: from averaged readings with the vehicle still (None: readings TRIAD can't use, e.g. a
-// magnetometer parallel to gravity or a dead sensor; try again with the next readings)
-let Some(mut filter) = align(&accel0, &mag0, &pos0, imu_spec, SIGMA_POS) else { return };
+// start-up, from readings taken with the vehicle still. None: the readings can't define an attitude
+// (e.g. magnetometer parallel to gravity, a dead sensor): try again with the next ones.
+let Some(mut filter) = FullStateESEKF::align(model, &accel0, &mag0, &pos0, SIGMA_POS) else { return };
 
-// every IMU sample, dt from timestamps (false = refused: a NaN reading or a bad dt; nothing changed)
-let ok = filter.predict(&accel, &gyro, dt);
+// every IMU sample; dt from the IMU timestamps. false = refused (NaN reading or bad dt), nothing changed.
+let ok = filter.predict(&ImuSample { accel, gyro }, dt);
 
-// when a measurement arrives (false = rejected: NaN, or an outlier by the gate)
-let used = filter.update_gps(&position, SIGMA_POS);         // any 3-D position fix (UWB or GPS)
-let used = filter.update_mag(&mag, &mag_reference(), SIGMA_MAG); // raw reading, any unit: only its direction is used
-let used = filter.update_height(height, SIGMA_HEIGHT);      // barometer or downward lidar
+// when a measurement arrives: UpdateOutcome::Fused { nis } or a Rejected... variant
+let outcome = filter.update_position(&position, SIGMA_POS); // GPS or UWB, navigation frame
+let outcome = filter.update_mag(&mag, SIGMA_MAG);           // any unit: only the direction is used
+let outcome = filter.update_height(height, SIGMA_HEIGHT);   // barometer or downward lidar
 
-// estimate: filter.x.p, filter.x.v, filter.x.q, filter.x.ab, filter.x.wb; covariance filter.p
-// for telemetry: filter.position_f32(), velocity_f32(), orientation_xyzw_f32(), angular_velocity_f32(&gyro)
+// the estimate
+let x = filter.get_state(); // x.p, x.v, x.q (body -> navigation), x.ab, x.wb; covariance: filter.get_covariance()
 ```
 
-`update_gps` takes any 3-D position fix in the navigation frame, so it serves UWB position as well.
-New sensors use the generic `update::<M>(&innovation, &h, &r, gate)`; `src/esekf/height.rs` is the smallest
-complete example.
-
-## Conventions
-
-- Navigation frame: z up (gravity `(0, 0, -g)`), x/y horizontal (ENU in `env.rs`). Attitude q rotates body vectors into it.
-- Error state order: position, velocity, attitude (local, radians), accel bias, gyro bias (15 numbers).
-- Units: SI (m, m/s, m/s^2, rad, rad/s); the magnetometer only needs a consistent unit (only its direction is used).
+Before flight: set gravity, the magnetic field (navigation frame) and the IMU noise in `src/full_state.rs`.

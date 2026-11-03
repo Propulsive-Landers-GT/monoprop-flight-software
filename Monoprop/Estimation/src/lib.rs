@@ -1,41 +1,34 @@
-//! Estimation: state estimation for the monoprop vehicle.
+//! Bare-metal error-state Kalman filter (ES-EKF): a template for new estimators.
 //!
-//! `#![no_std]`, no heap, f64, nalgebra fixed-size matrices; builds for the Teensy 4.1
-//! (thumbv7em-none-eabihf) and for the host (tests). See README.md for the module map and how to use it.
-#![no_std]
-#![allow(dead_code, unused_imports, unused_variables, unused_mut, unused_assignments, non_snake_case)]
+//! Fixed-size nalgebra matrices only: no heap, no `std` (only `core` and nalgebra), so the same code
+//! runs on a PC and on a microcontroller (e.g. the Teensy 4.1). f64 throughout.
+//!
+//! - `math.rs`: linear algebra and rotation helpers.
+//! - `model.rs`: the `BareESEKFModel` trait: what a vehicle/sensor model must provide.
+//! - `filter.rs`: the generic filter `BareESEKF<Model, E>`: predict, gated update, injection, reset.
+//! - `full_state.rs`: the reference model, `FullState` (15-state INS: IMU, position, magnetometer,
+//!   height), with alignment (TRIAD) and the VN-200 noise model.
+//!
+//! A new estimator: write a struct implementing `BareESEKFModel<E>` (copy `full_state.rs` as a
+//! starting point), add its measurements as `impl BareESEKF<YourModel, E>` blocks that call
+//! `update`, and use `BareESEKF<YourModel, E>`.
+//!
+//! In this crate the modules sit at the crate root; `interop.rs` adds f32 conversions for the Drone.
+#![cfg_attr(not(test), no_std)]
+#![allow(non_snake_case)] // the crate is named like the workspace's other members (Common, Drone)
 
-// ---- prelude ----
-pub use core::f64::consts::{FRAC_PI_2, PI, TAU};
-pub use nalgebra as na;
-pub use nalgebra::{
-    ComplexField, Matrix2, Matrix3, Quaternion, RealField, SMatrix, SVector, Unit, UnitQuaternion, Vector2, Vector3,
-};
-/// f64 3-vector and 3x3 matrix, the workhorses of the ESEKF.
-pub type V3 = Vector3<f64>;
-pub type M3 = Matrix3<f64>;
-pub type Mat<const R: usize, const C: usize> = SMatrix<f64, R, C>;
-pub type Vector<const N: usize> = SVector<f64, N>;
-/// Attitude quaternion (unit, Hamilton convention). `q * v` rotates a body-frame vector into the inertial frame.
-pub type Quat = UnitQuaternion<f64>;
+pub mod filter;
+pub mod full_state;
+pub mod math;
+pub mod model;
 
-pub mod env;
-pub use env::*;
-pub mod linalg;
-pub use linalg::*;
-pub mod quat;
-pub use quat::*;
-pub mod rot;
-pub use rot::*;
-pub mod nominal;
-pub use nominal::*;
-pub mod noise;
-pub use noise::*;
-pub mod errprop;
-pub use errprop::*;
-pub mod esekf;
-pub use esekf::*;
-pub mod align;
-pub use align::*;
+pub use filter::{BareESEKF, GATE_1DOF, GATE_2DOF, GATE_3DOF, UpdateOutcome};
+pub use full_state::{FullState, FullStateESEKF, ImuSample, ImuSpec, Nominal};
+pub use math::{M3, Mat, Quat, V3, Vector};
+pub use model::BareESEKFModel;
+
+#[cfg(test)]
+mod system_test;
+
 pub mod interop;
 pub use interop::*;
