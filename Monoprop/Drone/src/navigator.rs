@@ -1,8 +1,10 @@
 use Common::DroneTelemetry;
-use Estimation::{align, lidar_ground_z, mag_reference, Esekf, ImuSpec, LidarConfig, Nominal, GRAVITY, V3};
+use Estimation::full_state::GRAVITY;
+use Estimation::{FullState, FullStateESEKF, ImuSample as EkfImu, ImuSpec, Nominal, M3, V3};
 
 use crate::config::Config;
 use crate::imu_pair::ImuPair;
+use crate::measurements::{lidar_ground_z, update_gps_offset, update_lidar, LidarConfig};
 use crate::sensors::{self, ImuSample, SensorData};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,7 +31,7 @@ pub struct Navigator {
     cfg: Config,
     lidar: LidarConfig,
     pair: ImuPair,
-    filter: Option<Esekf>,
+    filter: Option<FullStateESEKF>,
     window: Window,
     gyro: V3,
     last_imu: Option<u64>,
@@ -78,13 +80,14 @@ impl Navigator {
     /// Use the new samples and return the vehicle state, None until aligned.
     pub fn update(&mut self, data: &SensorData) -> Option<VehicleState> {
         // first, on every call: the pair learns its A-B difference and clock offset from the first pair on
-        if let Some(s) = self.pair.combine(data.imu_a.as_ref(), data.imu_b.as_ref()) {
-            self.imu(&s);
+        let sample = self.pair.combine(data.imu_a.as_ref(), data.imu_b.as_ref());
+        if let Some(sample) = sample {
+            self.imu(&sample);
         }
         if let Some(s) = data.mag.filter(|s| newer(&mut self.last_mag, s.t_us)) {
             match self.filter.as_mut() {
                 Some(f) => {
-                    f.update_mag(&v3(s.field), &mag_reference(), self.cfg.mag_sigma);
+                    f.update_mag(&v3(s.field), self.cfg.mag_sigma);
                 }
                 None => {
                     self.window.mag += v3(s.field);
@@ -92,36 +95,27 @@ impl Navigator {
                 }
             }
         }
-        if let Some(s) = data.lidar.filter(|s| newer(&mut self.last_lidar, s.t_us)) {
+        if let Some(s) = data.lidar.filter(|s| {
+            s.range >= self.lidar.min_range
+                && s.range <= self.lidar.max_range
+                && newer(&mut self.last_lidar, s.t_us)
+        }) {
             match self.filter.as_mut() {
                 Some(f) => {
-                    f.update_lidar(s.range, self.cfg.lidar_sigma, &self.lidar);
+                    update_lidar(f, s.range, self.cfg.lidar_sigma, &self.lidar);
                 }
-                None if s.range >= self.lidar.min_range && s.range <= self.lidar.max_range => {
+                None => {
                     self.window.range += s.range;
                     self.window.ranges += 1;
                 }
-                None => {}
             }
         }
-        if let Some(s) = data.gps.filter(|s| newer(&mut self.last_gps, s.t_us)) {
-            if let Some(f) = self.filter.as_mut() {
-                f.update_gps_offset(&v3(s.position), &v3(s.sigma), &v3(self.cfg.gps_antenna_offset));
-            }
+        if let Some(s) = data.gps.filter(|s| newer(&mut self.last_gps, s.t_us))
+            && let Some(f) = self.filter.as_mut()
+        {
+            update_gps_offset(f, &v3(s.position), &v3(s.sigma), &v3(self.cfg.gps_antenna_offset));
         }
-        self.state()
-    }
-
-    pub fn state(&self) -> Option<VehicleState> {
-        let f = self.filter.as_ref()?;
-        let q = f.x.q.quaternion();
-        Some(VehicleState {
-            t_us: self.last_imu.unwrap_or(0),
-            position: f.x.p.into(),
-            velocity: f.x.v.into(),
-            attitude: [q.w, q.i, q.j, q.k],
-            angular_velocity: (self.gyro - f.x.wb).into(),
-        })
+        self.vehicle_state()
     }
 
     fn imu(&mut self, s: &ImuSample) {
@@ -132,11 +126,11 @@ impl Navigator {
         };
         self.last_imu = Some(s.t_us);
         let (accel, gyro) = (v3(s.accel), v3(s.gyro));
+        // a gap longer than max_gap_us isn't integrated: the clock resyncs on this sample
+        let gap = dt_us.is_some_and(|dt| dt > self.cfg.imu_max_gap_us);
         match self.filter.as_mut() {
             Some(f) => {
-                // a gap longer than max_gap_us isn't integrated: the clock resyncs on this sample
-                let dt = dt_us.filter(|&d| d <= self.cfg.imu_max_gap_us);
-                if dt.is_some_and(|d| f.predict(&accel, &gyro, d as f64 * 1e-6)) {
+                if !gap && dt_us.is_some_and(|dt| f.predict(&EkfImu { accel, gyro }, dt as f64 * 1e-6)) {
                     self.gyro = gyro;
                 }
             }
@@ -164,18 +158,21 @@ impl Navigator {
             c.imu_gyro_bias_random_walk,
             c.imu_rate_hz,
         );
+        let mean_accel = w.accel / f64::from(w.imu);
         let mag = w.mag / f64::from(w.mags);
-        if let Some(mut f) = align(&(w.accel / f64::from(w.imu)), &mag, &V3::zeros(), spec, c.align_sigma_pos) {
+        let filter = FullStateESEKF::align(FullState::new(spec), &mean_accel, &mag, &V3::zeros(), c.align_sigma_pos);
+        if let Some(mut f) = filter {
             // the stillness check has just shown the vehicle at rest: velocity known to velocity_sigma
             let var = c.align_velocity_sigma * c.align_velocity_sigma;
-            f.p.fixed_view_mut::<3, 15>(3, 0).fill(0.0);
-            f.p.fixed_view_mut::<15, 3>(0, 3).fill(0.0);
-            f.p.fixed_view_mut::<3, 3>(3, 3).copy_from(&(Estimation::M3::identity() * var));
+            let p = &mut f.error_covariance;
+            p.fixed_view_mut::<3, 15>(3, 0).fill(0.0);
+            p.fixed_view_mut::<15, 3>(0, 3).fill(0.0);
+            p.fixed_view_mut::<3, 3>(3, 3).copy_from(&(M3::identity() * var));
             // The pad ground is taken at home (height 0); the filter's own height isn't used.
             // TODO: add a truncation check back if pad readings near the lidar's 4 cm floor bias the ground
             // height (it mattered only with the 5 cm noise placeholder).
             if w.ranges >= c.pad_ground_samples {
-                let at_home = Nominal { p: V3::zeros(), ..f.x };
+                let at_home = Nominal { p: V3::zeros(), ..f.nominal_state };
                 if let Some(g) = lidar_ground_z(&at_home, w.range / f64::from(w.ranges), &self.lidar) {
                     self.lidar.ground_z = g;
                 }
@@ -185,7 +182,21 @@ impl Navigator {
         }
         self.window = Window::default();
     }
+
+    pub fn vehicle_state(&self) -> Option<VehicleState> {
+        let f = self.filter.as_ref()?;
+        let x = &f.nominal_state;
+        let q = x.q.quaternion();
+        Some(VehicleState {
+            t_us: self.last_imu.unwrap_or(0),
+            position: x.p.into(),
+            velocity: x.v.into(),
+            attitude: [q.w, q.i, q.j, q.k],
+            angular_velocity: (self.gyro - x.wb).into(),
+        })
+    }
 }
+
 
 /// The telemetry packet for a state, encoded into `buf`; the number of bytes used.
 pub fn encode_telemetry(s: &VehicleState, buf: &mut [u8; 64]) -> Option<usize> {

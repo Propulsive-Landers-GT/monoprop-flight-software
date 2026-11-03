@@ -6,5 +6,6 @@
 pub mod clock;
 pub mod config;
 pub mod imu_pair;
+pub mod measurements;
 pub mod navigator;
 pub mod sensors;
