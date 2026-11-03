@@ -1,5 +1,5 @@
 use crate::state::{SensorData, FlightPhase, ControlLoopState, ControlMode, FlightLimits, JogSetpoint};
-use crate::state::{JOG_TIMEOUT_S, JOG_MAX_GIMBAL_RAD, JOG_MAX_THRUST_N};
+use crate::state::{JOG_TIMEOUT_S, JOG_MAX_GIMBAL_RAD, JOG_MAX_THRUST_N, IMU_TIMEOUT_S};
 use crate::algorithms::{Navigator, GuidancePlanner, Controller};
 use ndarray::{Array1, Array2};
 
@@ -54,6 +54,9 @@ impl FlightStateMachine {
         self.state.last_mpc_update = 0.0;
         self.state.last_state_time = 0.0;
         self.state.last_position_update = 0.0;
+        self.state.last_valid_imu_sample = None;
+        self.state.last_valid_imu_time = 0.0;
+        self.state.imu_rejecting = false;
         self.state.mass = 80.0;
         self.state.flight_terminated = false;
         self.state.flight_phase = FlightPhase::Standby;
@@ -351,6 +354,11 @@ impl FlightStateMachine {
         
         let now = sensor_data.timestamp;
 
+        // Everything below sees only validated IMU data (see `validate_imu`). The raw sample,
+        // including any NaN/Inf, is still what main.rs logs.
+        let validated = self.validate_imu(sensor_data, now);
+        let sensor_data = &validated;
+
         // Centralized scheduling for Sensor Fusion (500 Hz)
         let sensor_fusion_due = self.scheduler.is_sensor_fusion_due(self.state.last_sensor_update, now);
         let sensor_dt = self.scheduler.sensor_dt(self.state.last_sensor_update, now);
@@ -424,9 +432,54 @@ impl FlightStateMachine {
         Some(control_signals)
     }
     
+    /// Returns a copy of `raw` whose `imu_data` is safe to hand to the algorithms:
+    /// - A sample with any NaN/Inf value is rejected and never reaches navigation, whatever navigator is
+    ///   plugged in. One diagnostic is queued when rejection starts and one when valid samples resume.
+    /// - A valid sample becomes the new `last_valid_imu_sample`.
+    /// - On ticks without a new valid sample (drivers return none when nothing new has arrived, or the
+    ///   sample was rejected), the last valid sample is held for up to `IMU_TIMEOUT_S`. After that
+    ///   `imu_data` is None and `check_flight_termination` ends the flight.
+    fn validate_imu(&mut self, raw: &SensorData, now: f64) -> SensorData {
+        match &raw.imu_data {
+            Some(sample) if sample.is_finite() => {
+                self.state.last_valid_imu_sample = Some(*sample);
+                self.state.last_valid_imu_time = now;
+                if self.state.imu_rejecting {
+                    self.state.imu_rejecting = false;
+                    self.state.diagnostics_queue.push("IMU samples valid again".to_string());
+                }
+            }
+            Some(_) => {
+                if !self.state.imu_rejecting {
+                    self.state.imu_rejecting = true;
+                    let msg = format!(
+                        "Rejected non-finite IMU sample (NaN/Inf) at t = {:.3}s: logged, not passed to navigation",
+                        now
+                    );
+                    println!("{}", msg);
+                    self.state.diagnostics_queue.push(msg);
+                }
+            }
+            None => {}
+        }
+
+        let imu_data = if self.imu_age(now) <= IMU_TIMEOUT_S { self.state.last_valid_imu_sample } else { None };
+        SensorData { imu_data, ..raw.clone() }
+    }
+
+    /// Time since the last valid IMU sample [s]. Counts from mission start before the first sample.
+    pub fn imu_age(&self, now: f64) -> f64 {
+        now - self.state.last_valid_imu_time
+    }
+
     fn check_flight_termination(&self, sensor_data: &SensorData, now: f64) -> Option<String> {
-        if sensor_data.imu_data.is_none() {
-            return Some("IMU data missing".to_string());
+        // IMU: flight critical, but brief gaps are normal (see `validate_imu`).
+        let imu_age = self.imu_age(now);
+        if imu_age > IMU_TIMEOUT_S {
+            return Some(format!(
+                "No valid IMU sample for {:.2}s (limit {:.1}s)",
+                imu_age, IMU_TIMEOUT_S
+            ));
         }
         
         if sensor_data.uwb_data.is_none() && sensor_data.gps_data.is_none() {
