@@ -58,8 +58,8 @@ impl McapLogger {
                 .unwrap_or_else(|_| "unknown".to_string());
 
             let mut sensor_metadata = BTreeMap::new();
-            sensor_metadata.insert("sensor/imu_model".to_string(), "VectorNav VN-200".to_string());
-            sensor_metadata.insert("sensor/gps_model".to_string(), "VectorNav VN-200 GNSS".to_string());
+            sensor_metadata.insert("sensor/imu_model".to_string(), "VectorNav VN-300".to_string());
+            sensor_metadata.insert("sensor/gps_model".to_string(), "VectorNav VN-300 GNSS".to_string());
             sensor_metadata.insert("rate".to_string(), "500 Hz (raw telemetry)".to_string());
             sensor_metadata.insert("session_id".to_string(), session_id.clone());
             
