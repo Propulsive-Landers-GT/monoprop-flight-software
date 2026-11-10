@@ -1,6 +1,7 @@
 use crate::state::{SensorData, VehicleState, FlightPhase, ControlLoopState, ControlMode, FlightLimits, JogSetpoint};
-use crate::state::{JOG_TIMEOUT_S, JOG_MAX_GIMBAL_RAD, JOG_MAX_THRUST_N, IMU_TIMEOUT_S};
+use crate::state::{JOG_TIMEOUT_S, IMU_TIMEOUT_S, STANDARD_GRAVITY_M_S2};
 use crate::state::PropulsionParameters;
+use crate::vehicle::{Vehicle, VehicleParameters, VehicleModules, MassComponent, MassProperties, EngineModel, FeedThrottle};
 use crate::algorithms::{Navigator, GuidancePlanner, Controller};
 use ndarray::{Array1, Array2};
 
@@ -19,7 +20,8 @@ pub struct FlightStateMachine {
     state: ControlLoopState,
     goal: [f64; 3],
     limits: FlightLimits,
-    propulsion: PropulsionParameters,
+    vehicle: Vehicle,
+    use_vehicle_masses: bool,
 }
 
 impl FlightStateMachine {
@@ -31,7 +33,8 @@ impl FlightStateMachine {
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0], // The ascent target. The descent targets the origin [0.0, 0.0, 0.0] as the landing pad.
             limits: FlightLimits::default(),
-            propulsion: PropulsionParameters::default(),
+            vehicle: Vehicle::default(),
+            use_vehicle_masses: false,
         }
     }
     
@@ -52,30 +55,88 @@ impl FlightStateMachine {
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0],
             limits: FlightLimits::default(),
-            propulsion,
+            vehicle: Vehicle::default(),
+            use_vehicle_masses: false,
         }
+    }
+
+    /// Create a vehicle using the default engine and TVC modules. Parameter component
+    /// masses take precedence over `VehicleState.mass` and `dry_mass` during initialization.
+    pub fn new_with_vehicle(parameters: VehicleParameters) -> Self {
+        let mut fsm = Self::new();
+        fsm.set_vehicle(parameters, VehicleModules::default());
+        fsm
+    }
+
+    /// Install a vehicle before a run, including when using `new_with_algorithms`.
+    /// Starts a fresh Standby run at the current pose and sensor timestamp.
+    pub fn set_vehicle(&mut self, parameters: VehicleParameters, modules: VehicleModules) {
+        let vehicle = Vehicle::new(parameters, modules.engine);
+        self.autopilot.configure_vehicle(vehicle.parameters(), vehicle.guidance_alpha());
+        self.actuator_controller.set_tvc(modules.tvc, vehicle.parameters().tvc);
+        self.vehicle = vehicle;
+        self.use_vehicle_masses = true;
+        self.initialize_with_state(self.state.vehicle_state.clone(), self.state.last_sensor_update);
+    }
+
+    pub fn vehicle_parameters(&self) -> &VehicleParameters {
+        self.vehicle.parameters()
+    }
+
+    /// Read the installed engine model's typed inputs, history or computed outputs.
+    /// Returns None when T is not the installed model type.
+    pub fn engine_model<T: EngineModel>(&self) -> Option<&T> {
+        self.vehicle.engine_model()
+    }
+
+    /// Set vehicle-specific inputs (e.g. throttle channels or temperatures) before
+    /// stepping the loop. The model retains these fields between dynamics updates.
+    pub fn engine_model_mut<T: EngineModel>(&mut self) -> Option<&mut T> {
+        self.vehicle.engine_model_mut()
+    }
+
+    /// Live command, opening and actuator model for an engine's feed (zero-based indices).
+    pub fn feed_throttle(&self, engine_index: usize, feed_index: usize) -> Option<&FeedThrottle> {
+        self.vehicle.feed_throttle(engine_index, feed_index)
+    }
+
+    /// Update a feed command or replace its actuator model. Initial settings remain
+    /// in vehicle_parameters(); reinitialization restores those settings.
+    pub fn feed_throttle_mut(&mut self, engine_index: usize, feed_index: usize) -> Option<&mut FeedThrottle> {
+        self.vehicle.feed_throttle_mut(engine_index, feed_index)
+    }
+
+    /// Live masses; the original values remain in `vehicle_parameters()`.
+    pub fn mass_components(&self) -> &[MassComponent] {
+        self.vehicle.components()
+    }
+
+    /// Live CoM and full inertia about that CoM, in the configured body reference frame.
+    /// Does not replace the existing controller's configured inertia/dynamics model.
+    pub fn mass_properties(&self) -> MassProperties {
+        self.vehicle.mass_properties()
+    }
+
+    pub fn set_component_mass(&mut self, name: &str, dry_mass_kg: f64, propellant_mass_kg: f64) {
+        self.vehicle.set_component_mass(name, dry_mass_kg, propellant_mass_kg);
+        self.state.mass = self.vehicle.mass_kg();
+        self.state.vehicle_state.mass = self.state.mass;
+        self.state.vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
     }
 
     pub fn propulsion_parameters(&self) -> PropulsionParameters {
-        self.propulsion
+        // Equivalent specific impulse for the bank's nominal thrust allocation.
+        PropulsionParameters { specific_impulse_s: 1.0 / (self.vehicle.guidance_alpha() * STANDARD_GRAVITY_M_S2) }
     }
 
-    /// Configure consumption before starting a run. Updates the built-in guidance coefficient
-    /// as well as mass depletion; use this instead of editing `Lossless::alpha` directly.
+    /// Set the same specific impulse on every engine before starting a run. For different
+    /// engine values, use `VehicleParameters.engines`. Updates built-in guidance as well.
     /// Custom guidance planners must be configured separately. Existing trajectories are retained.
-    pub fn set_propulsion_parameters(&mut self, parameters: PropulsionParameters) -> Result<(), String> {
-        if !parameters.specific_impulse_s.is_finite() || parameters.specific_impulse_s <= 0.0 {
-            return Err("specific impulse must be finite and positive [s]".to_string());
-        }
-        let alpha = parameters.alpha();
-        if !alpha.is_finite() || alpha <= 0.0 {
-            return Err("specific impulse must yield a finite, positive consumption coefficient".to_string());
-        }
+    pub fn set_propulsion_parameters(&mut self, parameters: PropulsionParameters) {
+        self.vehicle.set_propulsion_parameters(parameters);
         if let Some(lossless) = self.autopilot.lossless_mut() {
-            lossless.alpha = alpha;
+            lossless.alpha = self.vehicle.guidance_alpha();
         }
-        self.propulsion = parameters;
-        Ok(())
     }
     
     pub fn initialize(&mut self) {
@@ -88,6 +149,8 @@ impl FlightStateMachine {
     /// and resets control history. Algorithm tuning and flight limits are retained.
     /// Call `set_flight_phase` afterwards to start in flight; use `inject_state` afterwards
     /// for custom EKF biases/covariance/noise. Custom navigators must accept the 16D rocket state.
+    /// After `set_vehicle`/`new_with_vehicle`, masses come from the vehicle parameters;
+    /// the supplied state still sets position, velocity, attitude and angular velocity.
     ///
     /// ```
     /// use Lander::{fsm::FlightStateMachine, state::VehicleState};
@@ -95,10 +158,20 @@ impl FlightStateMachine {
     /// let mut initial = VehicleState::default();
     /// initial.position.z = 30.0;
     /// fsm.initialize_with_state(initial, 0.0);
-    /// fsm.autopilot_mut().lossless_mut().unwrap().upper_thrust_bound = 1100.0;
+    /// if let Some(guidance) = fsm.autopilot_mut().lossless_mut() {
+    ///     guidance.upper_thrust_bound = 1100.0;
+    /// }
     /// fsm.rcs_mut().kp = 15.0;
     /// ```
-    pub fn initialize_with_state(&mut self, vehicle_state: VehicleState, now: f64) {
+    pub fn initialize_with_state(&mut self, mut vehicle_state: VehicleState, now: f64) {
+        self.vehicle.reset();
+        if self.use_vehicle_masses {
+            vehicle_state.mass = self.vehicle.mass_kg();
+            vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
+        } else {
+            self.vehicle.set_legacy_mass(vehicle_state.mass, vehicle_state.dry_mass);
+        }
+        self.actuator_controller.reset_tvc(now);
         let mut navigator = crate::algorithms::navigator::Navigator::new();
         navigator.initialize(&vehicle_state);
         let ekf = navigator.ekf_es;
@@ -238,7 +311,7 @@ impl FlightStateMachine {
         Ok(())
     }
 
-    /// Jog setpoint from the ground. Clamped to gimbal +/-15 deg, thrust 0-1200 N, rcs -1/0/+1.
+    /// Jog setpoint from the ground. Clamped to the configured TVC limits and rcs -1/0/+1.
     /// Must be refreshed within `JOG_TIMEOUT_S` or `step()` outputs zeros again.
     pub fn set_jog(&mut self, gimbal_theta: f64, gimbal_phi: f64, thrust: f64, rcs: f64, now: f64) -> Result<(), String> {
         if self.state.control_mode != ControlMode::Jog || self.state.flight_phase != FlightPhase::Standby {
@@ -247,10 +320,11 @@ impl FlightStateMachine {
         if !(gimbal_theta.is_finite() && gimbal_phi.is_finite() && thrust.is_finite() && rcs.is_finite()) {
             return Err("jog setpoint is not finite".to_string());
         }
+        let tvc = self.vehicle.parameters().tvc;
         self.state.jog_setpoint = Some(JogSetpoint {
-            gimbal_theta: gimbal_theta.clamp(-JOG_MAX_GIMBAL_RAD, JOG_MAX_GIMBAL_RAD),
-            gimbal_phi: gimbal_phi.clamp(-JOG_MAX_GIMBAL_RAD, JOG_MAX_GIMBAL_RAD),
-            thrust: thrust.clamp(0.0, JOG_MAX_THRUST_N),
+            gimbal_theta: gimbal_theta.clamp(-tvc.max_angle_rad, tvc.max_angle_rad),
+            gimbal_phi: gimbal_phi.clamp(-tvc.max_angle_rad, tvc.max_angle_rad),
+            thrust: thrust.clamp(0.0, tvc.jog_max_thrust_n),
             rcs: if rcs > 0.5 { 1.0 } else if rcs < -0.5 { -1.0 } else { 0.0 },
             time: now,
         });
@@ -431,11 +505,15 @@ impl FlightStateMachine {
             self.autopilot.update_navigator(&mut self.state, sensor_data, now, sensor_dt);
         }
         
-        // Mass depletion model (based on last_thrust from operator / MPC and actual elapsed sensor_dt)
-        if matches!(self.state.flight_phase, FlightPhase::Ascent | FlightPhase::Hover | FlightPhase::Descent) && sensor_fusion_due {
-            let mass_flow = self.propulsion.mass_flow_rate(self.state.last_thrust);
-            self.state.mass -= mass_flow * sensor_dt;
-            self.state.mass = self.state.mass.max(self.state.vehicle_state.dry_mass);
+        // Feed actuators, engine dynamics, then component callbacks run at the fusion rate.
+        // Models choose their phase behavior; the default consumes only in flight.
+        if sensor_fusion_due {
+            if !self.use_vehicle_masses {
+                self.vehicle.set_legacy_mass(self.state.mass, self.state.vehicle_state.dry_mass);
+            }
+            self.vehicle.update_dynamics(self.state.last_thrust, sensor_data, sensor_dt, self.state.flight_phase);
+            self.state.mass = self.vehicle.mass_kg();
+            self.state.vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
         }
         self.state.vehicle_state.mass = self.state.mass;
         
@@ -468,9 +546,13 @@ impl FlightStateMachine {
         // Centralized scheduling for MPC (50 Hz) and Actuator output
         let mut mpc_control_output = None;
         if self.state.flight_phase == FlightPhase::Standby || self.state.flight_phase == FlightPhase::Armed || self.state.flight_phase == FlightPhase::Landed {
-            self.state.last_gimbal_theta = 0.0;
-            self.state.last_gimbal_phi = 0.0;
-            self.state.last_thrust = 0.0;
+            // Jog's TVC module needs the previous applied control. The jog block
+            // below still zeros all outputs when the setpoint expires.
+            if !(self.state.flight_phase == FlightPhase::Standby && self.state.control_mode == ControlMode::Jog) {
+                self.state.last_gimbal_theta = 0.0;
+                self.state.last_gimbal_phi = 0.0;
+                self.state.last_thrust = 0.0;
+            }
         } else if self.scheduler.is_mpc_due(self.state.last_mpc_update, now) {
             self.state.last_mpc_update = now;
             mpc_control_output = self.autopilot.update_mpc(&mut self.state, self.goal, now);
@@ -482,7 +564,10 @@ impl FlightStateMachine {
         // Ground jog (Standby only): actuators follow the operator setpoint while it is fresh, zeros otherwise.
         if self.state.flight_phase == FlightPhase::Standby && self.state.control_mode == ControlMode::Jog {
             let (theta, phi, thrust, rcs) = match self.state.jog_setpoint {
-                Some(jog) if now - jog.time <= JOG_TIMEOUT_S => (jog.gimbal_theta, jog.gimbal_phi, jog.thrust, jog.rcs),
+                Some(jog) if now - jog.time <= JOG_TIMEOUT_S => {
+                    let control = self.actuator_controller.jog(&self.state, [jog.gimbal_theta, jog.gimbal_phi, jog.thrust], now);
+                    (control[0], control[1], control[2], jog.rcs)
+                },
                 _ => (0.0, 0.0, 0.0, 0.0),
             };
             self.state.last_gimbal_theta = theta;

@@ -4,33 +4,33 @@ use crate::algorithms::{Navigator, GuidancePlanner, Controller};
 use crate::algorithms::navigator;
 use crate::algorithms::guidance::Lossless;
 use crate::algorithms::control::MPC;
+use crate::vehicle::VehicleParameters;
 
 pub struct Autopilot {
     navigator: Box<dyn Navigator>,
     guidance: Box<dyn GuidancePlanner>,
     controller: Box<dyn Controller>,
     previous_control: Vec<Array1<f64>>,
+    vehicle_parameters: VehicleParameters,
 }
 
 impl Autopilot {
     pub fn new() -> Self {
+        let vehicle_parameters = VehicleParameters::default();
         let mut lossless = Lossless::new();
-        let mut mpc = MPC::new();
+        let mpc = MPC::new();
         
         // Configure default parameters
-        lossless.dry_mass = 50.0;
-        lossless.upper_thrust_bound = 1000.0;
-        lossless.max_velocity = 15.0;
-        mpc.mass = 80.0;
-        mpc.max_thrust = 1000.0;
+        lossless.max_velocity = vehicle_parameters.descent_max_velocity_m_s;
         
-        let previous_control = vec![Array1::from(vec![0.0, 0.0, 80.0 * 9.81]); 10];
+        let previous_control = vec![Array1::from(vec![0.0, 0.0, vehicle_parameters.initial_mass_kg() * 9.81]); mpc.n_steps];
         
         Self {
             navigator: Box::new(navigator::Navigator::new()),
             guidance: Box::new(lossless),
             controller: Box::new(mpc),
             previous_control,
+            vehicle_parameters,
         }
     }
 
@@ -39,12 +39,33 @@ impl Autopilot {
         guidance: Box<dyn GuidancePlanner>,
         controller: Box<dyn Controller>,
     ) -> Self {
-        let previous_control = vec![Array1::from(vec![0.0, 0.0, 80.0 * 9.81]); controller.get_horizon_steps()];
+        let vehicle_parameters = VehicleParameters::default();
+        let previous_control = vec![Array1::from(vec![0.0, 0.0, vehicle_parameters.initial_mass_kg() * 9.81]); controller.get_horizon_steps()];
         Self {
             navigator,
             guidance,
             controller,
             previous_control,
+            vehicle_parameters,
+        }
+    }
+
+    /// Apply vehicle limits to the built-in algorithms. Custom implementations remain
+    /// caller-configured through `new_with_algorithms` and the mutable accessors.
+    pub fn configure_vehicle(&mut self, parameters: &VehicleParameters, guidance_alpha: f64) {
+        self.vehicle_parameters = parameters.clone();
+        if let Some(mpc) = self.mpc_mut() {
+            mpc.min_thrust = parameters.min_thrust_n();
+            mpc.max_thrust = parameters.max_thrust_n();
+            mpc.inertia_kg_m2 = parameters.inertia_kg_m2;
+            mpc.gimbal_limit_rad = parameters.tvc.max_angle_rad;
+        }
+        if let Some(lossless) = self.lossless_mut() {
+            lossless.dry_mass = parameters.dry_mass_kg();
+            lossless.lower_thrust_bound = parameters.min_thrust_n();
+            lossless.upper_thrust_bound = parameters.max_thrust_n();
+            lossless.tvc_range_rad = parameters.tvc.max_angle_rad;
+            lossless.alpha = guidance_alpha;
         }
     }
 
@@ -286,7 +307,7 @@ impl Autopilot {
         let current_vel = state.vehicle_state.velocity;
         let propellant_mass = state.mass - state.vehicle_state.dry_mass;
         
-        self.guidance.configure(50.0, 300.0, state.vehicle_state.dry_mass);
+        self.guidance.configure(self.vehicle_parameters.ascent_max_velocity_m_s, self.vehicle_parameters.min_thrust_n(), state.vehicle_state.dry_mass);
         
         if let Some(trajectory) = self.guidance.solve(
             [current_pos.x, current_pos.y, current_pos.z],
@@ -312,7 +333,7 @@ impl Autopilot {
         let landing_point = [0.0, 0.0, 1.5];
         let propellant_mass = state.mass - state.vehicle_state.dry_mass;
         
-        self.guidance.configure(15.0, 300.0, state.vehicle_state.dry_mass);
+        self.guidance.configure(self.vehicle_parameters.descent_max_velocity_m_s, self.vehicle_parameters.min_thrust_n(), state.vehicle_state.dry_mass);
         
         if let Some(trajectory) = self.guidance.solve(
             [current_pos.x, current_pos.y, current_pos.z],

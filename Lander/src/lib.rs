@@ -1,4 +1,5 @@
 pub mod state;
+pub mod vehicle;
 pub mod algorithms;
 pub mod fsm;
 pub mod mcap_logger;

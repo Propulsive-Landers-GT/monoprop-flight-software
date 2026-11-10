@@ -127,13 +127,14 @@ pub struct VehicleState {
 
 impl Default for VehicleState {
     fn default() -> Self {
+        let vehicle = crate::vehicle::VehicleParameters::default();
         Self {
             position: Vector3::zeros(),
             velocity: Vector3::zeros(),
             attitude: UnitQuaternion::identity(),
             angular_velocity: Vector3::zeros(),
-            mass: 80.0,
-            dry_mass: 50.0,
+            mass: vehicle.initial_mass_kg(),
+            dry_mass: vehicle.dry_mass_kg(),
         }
     }
 }
@@ -173,6 +174,8 @@ pub struct ControlLoopState {
 
 impl Default for ControlLoopState {
     fn default() -> Self {
+        let vehicle_state = VehicleState::default();
+        let mass = vehicle_state.mass;
         Self {
             sensor_fusion_state: None,
             trajectory_state: None,
@@ -184,16 +187,16 @@ impl Default for ControlLoopState {
             last_valid_imu_time: 0.0,
             imu_rejecting: false,
             start_time: 0.0,
-            vehicle_state: VehicleState::default(),
+            vehicle_state,
             flight_terminated: false,
             flight_phase: FlightPhase::Standby,
             last_state_time: 0.0,
             trajectory_generation_time: 0.0,
             last_gimbal_theta: 0.0,
             last_gimbal_phi: 0.0,
-            last_thrust: 80.0 * 9.81,
+            last_thrust: mass * 9.81,
             last_rcs_command: 0.0,
-            mass: 80.0,
+            mass,
             termination_reason: None,
             diagnostics_queue: Vec::new(),
             control_mode: ControlMode::Auto,
