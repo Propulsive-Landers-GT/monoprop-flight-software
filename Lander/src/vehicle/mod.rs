@@ -35,6 +35,7 @@ impl Default for VehicleModules {
 pub(crate) struct Vehicle {
     parameters: VehicleParameters,
     components: Vec<MassComponent>,
+    mass_properties: MassProperties,
     engine: Box<dyn EngineModel>,
     feed_throttles: Vec<Vec<FeedThrottle>>,
 }
@@ -52,6 +53,7 @@ impl Vehicle {
     pub fn new(parameters: VehicleParameters, engine: Box<dyn EngineModel>) -> Self {
         Self {
             components: parameters.mass_components.clone(),
+            mass_properties: parameters.mass_properties(),
             feed_throttles: Self::initial_throttles(&parameters),
             parameters,
             engine,
@@ -102,21 +104,20 @@ impl Vehicle {
     }
 
     pub fn mass_kg(&self) -> f64 {
-        self.components
-            .iter()
-            .map(MassComponent::total_mass_kg)
-            .sum()
+        self.mass_properties.mass_kg
     }
 
     pub fn dry_mass_kg(&self) -> f64 {
-        self.components
-            .iter()
-            .map(MassComponent::retained_mass_kg)
-            .sum()
+        self.mass_properties.dry_mass_kg
     }
 
-    pub fn mass_properties(&self) -> MassProperties {
-        MassProperties::from_components(&self.components)
+    pub fn mass_properties(&self) -> &MassProperties {
+        &self.mass_properties
+    }
+
+    /// Refresh totals, CoM, component offsets and inertia together after mutations.
+    fn update_mass_properties(&mut self) {
+        self.mass_properties = MassProperties::from_components(&self.components);
     }
 
     /// Engines share the requested net thrust in proportion to their rated maximum.
@@ -139,6 +140,7 @@ impl Vehicle {
         self.components = self.parameters.mass_components.clone();
         self.feed_throttles = Self::initial_throttles(&self.parameters);
         self.engine.reset();
+        self.update_mass_properties();
     }
 
     /// Backwards compatibility for the original aggregate-mass initializer. Only
@@ -146,6 +148,7 @@ impl Vehicle {
     pub fn set_legacy_mass(&mut self, mass: f64, dry_mass: f64) {
         self.components[0].dry_mass_kg = dry_mass;
         self.components[0].propellant_mass_kg = (mass - dry_mass).max(0.0);
+        self.update_mass_properties();
     }
 
     /// External mass accounting (e.g. a measured refill, vent, or payload release).
@@ -155,6 +158,7 @@ impl Vehicle {
             component.dry_mass_kg = dry_mass_kg;
             component.propellant_mass_kg = propellant_mass_kg;
         }
+        self.update_mass_properties();
     }
 
     pub fn update_dynamics(
@@ -204,5 +208,6 @@ impl Vehicle {
             };
             (component.update_mass)(component, &context);
         }
+        self.update_mass_properties();
     }
 }

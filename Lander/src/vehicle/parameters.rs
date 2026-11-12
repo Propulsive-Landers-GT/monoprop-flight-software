@@ -43,13 +43,12 @@ pub struct TvcParameters {
 }
 
 /// Editable vehicle description. All masses are kg, thrusts N, angles rad, and
-/// principal moments of inertia kg m². No live estimator/control history is stored here.
+/// component inertia tensors kg m². No live estimator/control history is stored here.
 #[derive(Debug, Clone)]
 pub struct VehicleParameters {
     pub mass_components: Vec<MassComponent>,
     pub engines: Vec<EngineParameters>,
     pub tvc: TvcParameters,
-    pub inertia_kg_m2: [f64; 3],
     pub ascent_max_velocity_m_s: f64,
     pub descent_max_velocity_m_s: f64,
 }

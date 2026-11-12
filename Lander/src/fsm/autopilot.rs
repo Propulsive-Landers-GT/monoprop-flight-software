@@ -4,7 +4,7 @@ use crate::algorithms::{Navigator, GuidancePlanner, Controller};
 use crate::algorithms::navigator;
 use crate::algorithms::guidance::Lossless;
 use crate::algorithms::control::MPC;
-use crate::vehicle::VehicleParameters;
+use crate::vehicle::{MassProperties, VehicleParameters};
 
 pub struct Autopilot {
     navigator: Box<dyn Navigator>,
@@ -57,7 +57,7 @@ impl Autopilot {
         if let Some(mpc) = self.mpc_mut() {
             mpc.min_thrust = parameters.min_thrust_n();
             mpc.max_thrust = parameters.max_thrust_n();
-            mpc.inertia_kg_m2 = parameters.inertia_kg_m2;
+            mpc.inertia_kg_m2 = parameters.mass_properties().inertia_kg_m2;
             mpc.gimbal_limit_rad = parameters.tvc.max_angle_rad;
         }
         if let Some(lossless) = self.lossless_mut() {
@@ -71,6 +71,14 @@ impl Autopilot {
 
     pub fn set_flight_phase(&mut self, phase: FlightPhase) {
         self.controller.set_flight_phase(phase);
+    }
+
+    /// Synchronize the built-in controller with the same mass estimate as the FSM.
+    pub fn update_mass_properties(&mut self, properties: &MassProperties) {
+        if let Some(mpc) = self.mpc_mut() {
+            mpc.mass = properties.mass_kg;
+            mpc.inertia_kg_m2 = properties.inertia_kg_m2;
+        }
     }
 
     pub fn get_horizon_steps(&self) -> usize {

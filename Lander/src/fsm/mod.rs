@@ -112,16 +112,23 @@ impl FlightStateMachine {
     }
 
     /// Live CoM and full inertia about that CoM, in the configured body reference frame.
-    /// Does not replace the existing controller's configured inertia/dynamics model.
+    /// Refreshed alongside mass estimates and used by the built-in MPC.
     pub fn mass_properties(&self) -> MassProperties {
-        self.vehicle.mass_properties()
+        self.vehicle.mass_properties().clone()
     }
 
     pub fn set_component_mass(&mut self, name: &str, dry_mass_kg: f64, propellant_mass_kg: f64) {
         self.vehicle.set_component_mass(name, dry_mass_kg, propellant_mass_kg);
-        self.state.mass = self.vehicle.mass_kg();
-        self.state.vehicle_state.mass = self.state.mass;
-        self.state.vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
+        self.sync_mass_properties();
+    }
+
+    /// Publish one consistent mass/geometry estimate to state and the controller.
+    fn sync_mass_properties(&mut self) {
+        let properties = self.vehicle.mass_properties();
+        self.state.mass = properties.mass_kg;
+        self.state.vehicle_state.mass = properties.mass_kg;
+        self.state.vehicle_state.dry_mass = properties.dry_mass_kg;
+        self.autopilot.update_mass_properties(properties);
     }
 
     pub fn propulsion_parameters(&self) -> PropulsionParameters {
@@ -194,6 +201,7 @@ impl FlightStateMachine {
         };
         self.autopilot.set_flight_phase(FlightPhase::Standby);
         self.autopilot.reset_control([0.0, 0.0, mass * 9.81], mass, now);
+        self.sync_mass_properties();
         let (_, _, roll) = self.state.vehicle_state.attitude.euler_angles();
         let roll_rate = self.state.vehicle_state.angular_velocity.z;
         let rcs = self.actuator_controller.rcs_mut();
@@ -512,8 +520,7 @@ impl FlightStateMachine {
                 self.vehicle.set_legacy_mass(self.state.mass, self.state.vehicle_state.dry_mass);
             }
             self.vehicle.update_dynamics(self.state.last_thrust, sensor_data, sensor_dt, self.state.flight_phase);
-            self.state.mass = self.vehicle.mass_kg();
-            self.state.vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
+            self.sync_mass_properties();
         }
         self.state.vehicle_state.mass = self.state.mass;
         

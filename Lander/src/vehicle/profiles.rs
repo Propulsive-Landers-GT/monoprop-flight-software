@@ -7,10 +7,9 @@ use crate::state::PropulsionParameters;
 pub fn monarch() -> VehicleParameters {
     // The Monarch profile. The original aggregate mass is kept as a
     // single component because no measured tank/engine mass breakdown exists here.
-    let inertia_kg_m2 = [6.65, 6.65, 2.3];
     let mut component = MassComponent::new("vehicle", 50.0, 30.0);
     component.inertia_kg_m2 =
-        nalgebra::Matrix3::from_diagonal(&nalgebra::Vector3::from(inertia_kg_m2));
+        nalgebra::Matrix3::from_diagonal(&nalgebra::Vector3::new(6.65, 6.65, 2.3));
     VehicleParameters {
         mass_components: vec![component],
         engines: vec![EngineParameters {
@@ -26,7 +25,6 @@ pub fn monarch() -> VehicleParameters {
             max_thrust_step_n: 40.0,
             jog_max_thrust_n: 1200.0,
         },
-        inertia_kg_m2,
         ascent_max_velocity_m_s: 50.0,
         descent_max_velocity_m_s: 15.0,
     }

@@ -70,14 +70,16 @@ impl MassComponent {
     }
 }
 
-/// Aggregate geometry, expressed in the common body axes. This is independent of
-/// vehicle attitude/world position and the existing MPC's configured inertia.
+/// Aggregate geometry about the live vehicle CoM, expressed in common body axes.
+/// Recomputed after mass/geometry updates and supplied to the built-in MPC.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MassProperties {
     pub mass_kg: f64,
     pub dry_mass_kg: f64,
     /// Vector from the shared reference point to the vehicle CoM [m].
     pub center_of_mass_m: Vector3<f64>,
+    /// Vectors from vehicle CoM to component CoMs, in mass-component index order.
+    pub component_offsets_m: Vec<Vector3<f64>>,
     /// Full vehicle inertia about the vehicle CoM, including parallel-axis terms.
     pub inertia_kg_m2: Matrix3<f64>,
 }
@@ -89,13 +91,16 @@ impl MassProperties {
         let center_of_mass_m = components.iter().fold(Vector3::zeros(), |sum, c| {
             sum + c.position_m * (c.total_mass_kg() / mass_kg)
         });
+        let component_offsets_m: Vec<_> = components
+            .iter()
+            .map(|component| component.position_m - center_of_mass_m)
+            .collect();
         let mut inertia_kg_m2 = Matrix3::zeros();
-        for component in components {
+        for (component, offset) in components.iter().zip(&component_offsets_m) {
             let mass = component.total_mass_kg();
             if mass == 0.0 {
                 continue;
             }
-            let offset = component.position_m - center_of_mass_m;
             inertia_kg_m2 += component.inertia_kg_m2
                 + mass
                     * (offset.norm_squared() * Matrix3::identity() - offset * offset.transpose());
@@ -104,6 +109,7 @@ impl MassProperties {
             mass_kg,
             dry_mass_kg,
             center_of_mass_m,
+            component_offsets_m,
             inertia_kg_m2,
         }
     }

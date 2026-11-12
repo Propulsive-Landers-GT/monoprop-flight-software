@@ -12,7 +12,8 @@ pub struct MPC {
     pub mass: f64,
     pub min_thrust: f64,
     pub max_thrust: f64,
-    pub inertia_kg_m2: [f64; 3],
+    /// Live full tensor about vehicle CoM, in body axes.
+    pub inertia_kg_m2: nalgebra::Matrix3<f64>,
     pub gimbal_limit_rad: f64,
     pub q: Array2<f64>,
     pub r: Array2<f64>,
@@ -105,7 +106,7 @@ impl MPC {
             mass: vehicle.initial_mass_kg(),
             min_thrust: vehicle.min_thrust_n(),
             max_thrust: vehicle.max_thrust_n(),
-            inertia_kg_m2: vehicle.inertia_kg_m2,
+            inertia_kg_m2: vehicle.mass_properties().inertia_kg_m2,
             gimbal_limit_rad: vehicle.tvc.max_angle_rad,
             q,
             r,
@@ -169,8 +170,7 @@ impl MPC {
             }
         }
         
-        let mut moi = Array2::<f64>::zeros((3,3));
-        for i in 0..3 { moi[(i,i)] = self.inertia_kg_m2[i]; }
+        let moi = Array2::from_shape_fn((3, 3), |(row, col)| self.inertia_kg_m2[(row, col)]);
         
         let gimbal_limit = self.gimbal_limit_rad;
         let thrust_min = self.min_thrust;
