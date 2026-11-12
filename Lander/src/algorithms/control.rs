@@ -12,6 +12,9 @@ pub struct MPC {
     pub mass: f64,
     pub min_thrust: f64,
     pub max_thrust: f64,
+    /// Live full tensor about vehicle CoM, in body axes.
+    pub inertia_kg_m2: nalgebra::Matrix3<f64>,
+    pub gimbal_limit_rad: f64,
     pub q: Array2<f64>,
     pub r: Array2<f64>,
     pub qn: Array2<f64>,
@@ -36,6 +39,8 @@ impl Clone for MPC {
             mass: self.mass,
             min_thrust: self.min_thrust,
             max_thrust: self.max_thrust,
+            inertia_kg_m2: self.inertia_kg_m2,
+            gimbal_limit_rad: self.gimbal_limit_rad,
             q: self.q.clone(),
             r: self.r.clone(),
             qn: self.qn.clone(),
@@ -67,6 +72,7 @@ impl std::fmt::Debug for MPC {
 
 impl MPC {
     pub fn new() -> Self {
+        let vehicle = crate::vehicle::VehicleParameters::default();
         let n = 13;
         let m = 3;
         let n_steps = 10;
@@ -97,9 +103,11 @@ impl MPC {
             m,
             n_steps,
             dt,
-            mass: 80.0,
-            min_thrust: 300.0,
-            max_thrust: 1200.0,
+            mass: vehicle.initial_mass_kg(),
+            min_thrust: vehicle.min_thrust_n(),
+            max_thrust: vehicle.max_thrust_n(),
+            inertia_kg_m2: vehicle.mass_properties().inertia_kg_m2,
+            gimbal_limit_rad: vehicle.tvc.max_angle_rad,
             q,
             r,
             qn,
@@ -112,6 +120,15 @@ impl MPC {
             manual_weights: false,
             panoc_cache,
         }
+    }
+
+    /// Clear solver history after changing the starting state or horizon, preserving tuning.
+    pub fn reset(&mut self, mass: f64, now: f64) {
+        self.mass = mass;
+        self.system_time = now;
+        self.last_solve_time = now;
+        self.reset_warm_start = true;
+        self.panoc_cache = optimization_engine::panoc::PANOCCache::new(self.m * self.n_steps, 1e-4, 20);
     }
 
     pub fn set_manual_weights(
@@ -153,13 +170,10 @@ impl MPC {
             }
         }
         
-        let mut moi = Array2::<f64>::zeros((3,3));
-        moi[(0,0)] = 6.65;
-        moi[(1,1)] = 6.65;
-        moi[(2,2)] = 2.3;
+        let moi = Array2::from_shape_fn((3, 3), |(row, col)| self.inertia_kg_m2[(row, col)]);
         
-        let gimbal_limit = 15.0_f64.to_radians();
-        let thrust_min = 300.0;
+        let gimbal_limit = self.gimbal_limit_rad;
+        let thrust_min = self.min_thrust;
         let thrust_max = self.max_thrust;
 
         let u_min = Array1::from(vec![-gimbal_limit, -gimbal_limit, thrust_min]);
