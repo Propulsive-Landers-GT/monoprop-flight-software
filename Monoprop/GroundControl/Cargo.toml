@@ -10,6 +10,6 @@ anyhow = "1.0"
 crossbeam-channel = "0.5"
 optimization_engine = "0.6.0"
 ndarray = "0.15"
-ndarray-linalg = { version = "0.16", features = ["intel-mkl"] }
+toml = "0.8"
 
-Common = { path = "../Common" }
+monoprop-common = { path = "../../../monoprop-prototype-software/common" }
