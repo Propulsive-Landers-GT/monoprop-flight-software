@@ -55,7 +55,7 @@ pub struct VehicleParameters {
 
 impl Default for VehicleParameters {
     fn default() -> Self {
-        super::profiles::monarch()
+        super::profiles::old_monarch()
     }
 }
 
@@ -75,7 +75,11 @@ impl VehicleParameters {
     }
 
     pub fn mass_properties(&self) -> MassProperties {
-        MassProperties::from_components(&self.mass_components)
+        let mut components = self.mass_components.clone();
+        for component in &mut components {
+            component.refresh_geometry();
+        }
+        MassProperties::from_components(&components)
     }
 
     pub fn min_thrust_n(&self) -> f64 {

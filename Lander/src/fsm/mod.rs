@@ -176,7 +176,7 @@ impl FlightStateMachine {
             vehicle_state.mass = self.vehicle.mass_kg();
             vehicle_state.dry_mass = self.vehicle.dry_mass_kg();
         } else {
-            self.vehicle.set_legacy_mass(vehicle_state.mass, vehicle_state.dry_mass);
+            self.vehicle.initialize_legacy_mass(vehicle_state.mass, vehicle_state.dry_mass);
         }
         self.actuator_controller.reset_tvc(now);
         let mut navigator = crate::algorithms::navigator::Navigator::new();

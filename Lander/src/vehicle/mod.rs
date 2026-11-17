@@ -1,6 +1,7 @@
 #![doc = include_str!("README.md")]
 
 pub mod engine;
+pub mod geometry;
 pub mod mass;
 mod parameters;
 pub mod profiles;
@@ -9,6 +10,7 @@ pub mod tvc;
 
 use crate::state::{FlightPhase, PropulsionParameters, SensorData};
 pub use engine::{ConstantSpecificImpulse, EngineModel, EngineUpdateContext};
+pub use geometry::{ComponentGeometry, DryWetInertia, LiquidTankGeometry};
 pub use mass::{MassComponent, MassProperties, MassUpdateContext, MassUpdateFn};
 pub use parameters::{EngineParameters, PropellantFeed, TvcParameters, VehicleParameters};
 pub use throttle::{
@@ -50,7 +52,10 @@ impl Default for Vehicle {
 }
 
 impl Vehicle {
-    pub fn new(parameters: VehicleParameters, engine: Box<dyn EngineModel>) -> Self {
+    pub fn new(mut parameters: VehicleParameters, engine: Box<dyn EngineModel>) -> Self {
+        for component in &mut parameters.mass_components {
+            component.refresh_geometry();
+        }
         Self {
             components: parameters.mass_components.clone(),
             mass_properties: parameters.mass_properties(),
@@ -117,6 +122,9 @@ impl Vehicle {
 
     /// Refresh totals, CoM, component offsets and inertia together after mutations.
     fn update_mass_properties(&mut self) {
+        for component in &mut self.components {
+            component.refresh_geometry();
+        }
         self.mass_properties = MassProperties::from_components(&self.components);
     }
 
@@ -149,6 +157,12 @@ impl Vehicle {
         self.components[0].dry_mass_kg = dry_mass;
         self.components[0].propellant_mass_kg = (mass - dry_mass).max(0.0);
         self.update_mass_properties();
+    }
+
+    /// Preserve an explicitly supplied starting mass through prelaunch updates.
+    pub fn initialize_legacy_mass(&mut self, mass: f64, dry_mass: f64) {
+        self.set_legacy_mass(mass, dry_mass);
+        self.parameters.mass_components[0] = self.components[0].clone();
     }
 
     /// External mass accounting (e.g. a measured refill, vent, or payload release).

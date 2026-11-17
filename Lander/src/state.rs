@@ -89,7 +89,8 @@ pub const JOG_MAX_THRUST_N: f64 = 1200.0;
 pub const IMU_TIMEOUT_S: f64 = 1.0;
 
 /// Reference acceleration for specific impulse in seconds, not local vehicle gravity.
-pub const STANDARD_GRAVITY_M_S2: f64 = 9.80665;
+/// Rounded to 9.81 to preserve the original guidance and mass-depletion model.
+pub const STANDARD_GRAVITY_M_S2: f64 = 9.81;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PropulsionParameters {
@@ -111,7 +112,8 @@ impl PropulsionParameters {
 
     /// Propellant consumption rate [kg/s] for a non-negative thrust magnitude [N].
     pub fn mass_flow_rate(&self, thrust_n: f64) -> f64 {
-        thrust_n * self.alpha()
+        // Keep the original division order for the compatibility profile.
+        thrust_n / (self.specific_impulse_s * STANDARD_GRAVITY_M_S2)
     }
 }
 

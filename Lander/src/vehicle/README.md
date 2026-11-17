@@ -4,6 +4,22 @@ Define masses, engine feeds and actuator settings with `VehicleParameters`.
 Start from `profiles::monarch()` and replace the engine, feed-throttle or TVC
 models when your vehicle needs different behavior. Values use SI units.
 
+- `profiles::old_monarch()` preserves the old flight-software 80/50 kg defaults
+  and fixed controller inertia. Compatibility constructors and `Default` use it.
+- `profiles::monarch()` separates the frame, N₂ storage, single nitrous tank and
+  engine. Liquid level moves the tank CoM; tank and engine inertia update with
+  remaining contents. Total vehicle CoM/inertia are calculated from these parts.
+- Edit [profiles/old_monarch.rs](profiles/old_monarch.rs) or
+  [profiles/monarch.rs](profiles/monarch.rs). **TODO:** replace the combined N₂
+  placeholder with individual tanks using accurate masses, positions and inertias.
+  Those individual measurements are not yet available.
+
+Monarch starts at 79.88 kg using the simulator's estimates. Its 55.88 kg structure
+plus 5 kg retained nitrogen gives a 60.88 kg guidance/depletion floor with the
+default engine. Nitrogen transfer/RCS consumption is not modeled by that engine.
+The 16:3 oxidizer/fuel ratio, constant Isp, upright liquid and neutral-gimbal
+geometry are approximations; custom engine/TVC modules can replace them.
+
 ## Configure and initialize
 
 Each mass component stores its own CoM position and inertia tensor in common
@@ -76,7 +92,10 @@ It selects the first matching name; if none matches, the `if let` body is skippe
 - CoM, component offsets and full inertia are recalculated after mass/geometry
   updates using the parallel-axis theorem. The built-in MPC receives that tensor.
 - Component intrinsic inertia must be updated by your model when its internal
-  mass distribution changes. Additional named masses count toward retained/dry mass.
+  mass distribution changes. Optional `component.geometry` models do this after
+  callbacks and external mass setters; set it to `None` to manage geometry yourself.
+  Edit `LiquidTankGeometry.shell_position_m` to move a tank mount; its live
+  `position_m` is the calculated CoM. Additional masses count toward retained/dry mass.
 - Reinitialization restores configured component and throttle state and resets
   engine/TVC history. Configured component totals determine initial vehicle mass.
 
@@ -142,6 +161,6 @@ target; `opening` tracks realized position. Use `set_model()` to replace behavio
 and `model_mut::<YourValve>()` to edit model-specific inputs. For custom gimbal
 behavior, implement `TvcModel` and supply it through `VehicleModules.tvc`.
 
-See [mass.rs](mass.rs), [engine.rs](engine.rs), [throttle.rs](throttle.rs) and
+See [mass.rs](mass.rs), [geometry.rs](geometry.rs), [engine.rs](engine.rs), [throttle.rs](throttle.rs) and
 [tvc.rs](tvc.rs) for the interfaces. The controller still outputs one net thrust
 command; separate feed commands and hardware servo I/O belong to your caller.

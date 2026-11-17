@@ -35,6 +35,9 @@ pub struct MassComponent {
     /// Inertia of the entire component about its own CoM, in body axes [kg m²].
     /// Includes dry, propellant and additional masses. Zero models a point mass.
     pub inertia_kg_m2: Matrix3<f64>,
+    /// Optional distribution model. When set, it supplies live position/inertia
+    /// after mass updates. Leave None for geometry managed by your own callback.
+    pub geometry: Option<super::geometry::ComponentGeometry>,
     pub update_mass: MassUpdateFn,
 }
 
@@ -49,6 +52,7 @@ impl MassComponent {
             additional_masses_kg: BTreeMap::new(),
             position_m: Vector3::zeros(),
             inertia_kg_m2: Matrix3::zeros(),
+            geometry: None,
             update_mass: Self::deplete_propellant,
         }
     }
@@ -57,13 +61,24 @@ impl MassComponent {
         self.retained_mass_kg() + self.propellant_mass_kg
     }
 
+    /// Refresh this component's CoM and intrinsic inertia from its current masses.
+    /// Called automatically by the vehicle; useful after editing a profile directly.
+    pub fn refresh_geometry(&mut self) {
+        if let Some(model) = &self.geometry {
+            let (position, inertia) = model.properties(self);
+            self.position_m = position;
+            self.inertia_kg_m2 = inertia;
+        }
+    }
+
     /// Everything except the propellant available to the engine feed system.
     pub fn retained_mass_kg(&self) -> f64 {
         self.dry_mass_kg + self.additional_masses_kg.values().sum::<f64>()
     }
 
     /// Default updater. A custom updater can call this before updating other mass
-    /// terms or recalculating geometry. Intrinsic inertia is not automatically scaled.
+    /// terms. The vehicle evaluates optional geometry models afterwards; otherwise
+    /// intrinsic inertia is left to the custom callback.
     pub fn deplete_propellant(&mut self, context: &MassUpdateContext<'_>) {
         self.propellant_mass_kg =
             (self.propellant_mass_kg - context.propellant_consumed_kg).max(0.0);
