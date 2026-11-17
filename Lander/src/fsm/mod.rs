@@ -1,6 +1,7 @@
 use crate::state::{SensorData, FlightPhase, ControlLoopState, ControlMode, FlightLimits, JogSetpoint};
 use crate::state::{JOG_TIMEOUT_S, JOG_MAX_GIMBAL_RAD, JOG_MAX_THRUST_N};
 use crate::algorithms::{Navigator, GuidancePlanner, Controller};
+use crate::mcap_logger::McapLogger;
 use ndarray::{Array1, Array2};
 
 mod scheduler;
@@ -18,6 +19,10 @@ pub struct FlightStateMachine {
     state: ControlLoopState,
     goal: [f64; 3],
     limits: FlightLimits,
+    /// MCAP recording, if one was started with `start_recording`
+    recorder: Option<McapLogger>,
+    /// How many `diagnostics_queue` entries have already gone to the recording
+    diagnostics_logged: usize,
 }
 
 impl FlightStateMachine {
@@ -29,6 +34,8 @@ impl FlightStateMachine {
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0], // The ascent target. The descent targets the origin [0.0, 0.0, 0.0] as the landing pad.
             limits: FlightLimits::default(),
+            recorder: None,
+            diagnostics_logged: 0,
         }
     }
     
@@ -44,6 +51,8 @@ impl FlightStateMachine {
             state: ControlLoopState::default(),
             goal: [0.0, 0.0, 50.0],
             limits: FlightLimits::default(),
+            recorder: None,
+            diagnostics_logged: 0,
         }
     }
     
@@ -282,6 +291,35 @@ impl FlightStateMachine {
         &mut self.state
     }
 
+    /// Start recording telemetry to an MCAP file. Every `step()` is logged until `stop_recording`.
+    pub fn start_recording(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.recorder = Some(McapLogger::new(path)?);
+        self.diagnostics_logged = 0;
+        Ok(())
+    }
+
+    /// Finish the recording so the file is complete. Does nothing if no recording was started.
+    pub fn stop_recording(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(recorder) = self.recorder.take() {
+            recorder.finish()?;
+        }
+        Ok(())
+    }
+
+    /// Hand out the queued diagnostics and clear the queue. Use this instead of draining
+    /// `diagnostics_queue` directly, so the recording's count stays in step.
+    pub fn take_diagnostics(&mut self) -> Vec<String> {
+        self.diagnostics_logged = 0;
+        self.state.diagnostics_queue.drain(..).collect()
+    }
+
+    /// Write a diagnostic message straight to the recording (e.g. a caller's end-of-flight note).
+    pub fn record_diagnostic(&mut self, now: f64, msg: &str) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            let _ = recorder.log_diagnostics((now * 1e9).round() as u64, msg);
+        }
+    }
+
     fn next_phase(&self, goal_position: [f64; 3], now: f64) -> FlightPhase {
         let current_altitude = self.state.vehicle_state.position.z;
         let goal_altitude = goal_position[2];
@@ -343,8 +381,36 @@ impl FlightStateMachine {
             }
         }
     }
-    
+
+    /// One flight software tick. Runs `step_inner` and, if a recording was started with
+    /// `start_recording`, logs this tick's sensors, diagnostics, command, state estimate and phase.
     pub fn step(&mut self, sensor_data: &SensorData) -> Option<[f64; 4]> {
+        let timestamp_ns = (sensor_data.timestamp * 1e9).round() as u64;
+        if let Some(recorder) = self.recorder.as_mut() {
+            let _ = recorder.log_sensor_data(timestamp_ns, sensor_data);
+        }
+
+        let output = self.step_inner(sensor_data);
+
+        if let Some(recorder) = self.recorder.as_mut() {
+            // Only diagnostics queued since the last log; the queue is emptied by `take_diagnostics`
+            let new_diagnostics = self.state.diagnostics_queue.get(self.diagnostics_logged..).unwrap_or(&[]);
+            for msg in new_diagnostics {
+                let _ = recorder.log_diagnostics(timestamp_ns, msg);
+            }
+            self.diagnostics_logged = self.state.diagnostics_queue.len();
+
+            if let Some(out) = output {
+                let _ = recorder.log_control_output(timestamp_ns, out[0], out[1], out[2]);
+            }
+            let _ = recorder.log_vehicle_state(timestamp_ns, &self.state.vehicle_state);
+            let _ = recorder.log_flight_phase(timestamp_ns, self.state.flight_phase, sensor_data.timestamp);
+        }
+
+        output
+    }
+    
+    fn step_inner(&mut self, sensor_data: &SensorData) -> Option<[f64; 4]> {
         if self.state.flight_terminated {
             return None;
         }

@@ -1,6 +1,5 @@
 use Lander::fsm::FlightStateMachine;
 use Lander::state::{self, SensorData};
-use Lander::mcap_logger::McapLogger;
 use Lander::telemetry::{self, GroundLink};
 use std::sync::mpsc::{self, Receiver};
 
@@ -29,10 +28,6 @@ impl Clock {
         Self {
             start_time: std::time::Instant::now(),
         }
-    }
-
-    pub fn elapsed_ns(&self) -> u64 {
-        self.start_time.elapsed().as_nanos() as u64
     }
 
     pub fn elapsed_secs(&self) -> f64 {
@@ -92,12 +87,13 @@ fn main() {
     
     let clock = Clock::new();
     
+    // Every flight is recorded; the FSM logs each step() itself. Unique name per run.
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let log_filename = format!("flight_log_{}.mcap", timestamp);
-    let mut mcap_logger = McapLogger::new(&log_filename).expect("Failed to initialize MCAP logger");
+    fsm.start_recording(&log_filename).expect("Failed to initialize MCAP logger");
     println!("Logging telemetry to {}", log_filename);
         
     // Ground-station link. Telemetry is a convenience, never a reason not to fly.
@@ -116,7 +112,6 @@ fn main() {
     println!("FSM running...");
     
     loop {
-        let timestamp_ns = clock.elapsed_ns();
         let mission_time = clock.elapsed_secs();
 
         // Check for stdin commands
@@ -154,17 +149,11 @@ fn main() {
             tank_pressure: Some(300.0),
         };
         
-        // Log sensor data
-        let _ = mcap_logger.log_sensor_data(timestamp_ns, &sensor_data);
+        // Step the flight state machine (also writes this tick to the MCAP recording)
+        let _control_output_opt = fsm.step(&sensor_data);
         
-        // Step the flight state machine
-        let control_output_opt = fsm.step(&sensor_data);
-        
-        // Drain FSM diagnostic messages once: they go to the MCAP log and to the ground station
-        let diagnostics: Vec<String> = fsm.get_state_mut().diagnostics_queue.drain(..).collect();
-        for msg in &diagnostics {
-            let _ = mcap_logger.log_diagnostics(timestamp_ns, msg);
-        }
+        // Drain FSM diagnostic messages once for the ground station (step() already recorded them)
+        let diagnostics: Vec<String> = fsm.take_diagnostics();
 
         let flight_over = fsm.get_state().flight_terminated || fsm.get_state().flight_phase == state::FlightPhase::Landed;
         if let Some(link) = ground_link.as_mut() {
@@ -182,31 +171,13 @@ fn main() {
             let reason = fsm.get_state().termination_reason.clone().unwrap_or_else(|| "Unknown".to_string());
             let msg = format!("Flight terminated - zeroing controls. Reason: {}", reason);
             println!("{}", msg);
-            let _ = mcap_logger.log_diagnostics(timestamp_ns, &msg);
-            
-            // Log final vehicle state and flight phase
-            let _ = mcap_logger.log_vehicle_state(timestamp_ns, &fsm.get_state().vehicle_state);
-            let _ = mcap_logger.log_flight_phase(timestamp_ns, fsm.get_state().flight_phase, mission_time);
+            fsm.record_diagnostic(mission_time, &msg);
             break;
         }
         
-        if let Some(control_output) = control_output_opt {
-            // Log control output (gimbal_theta, gimbal_phi, thrust)
-            let _ = mcap_logger.log_control_output(
-                timestamp_ns,
-                control_output[0],
-                control_output[1],
-                control_output[2],
-            );
-        }
-        
-        // Log vehicle state and flight phase
-        let _ = mcap_logger.log_vehicle_state(timestamp_ns, &fsm.get_state().vehicle_state);
-        let _ = mcap_logger.log_flight_phase(timestamp_ns, fsm.get_state().flight_phase, mission_time);
-        
         if fsm.get_state().flight_phase == state::FlightPhase::Landed {
             println!("Landed successfully at {:.2}m altitude!", fsm.get_state().vehicle_state.position.z);
-            let _ = mcap_logger.log_diagnostics(timestamp_ns, "Landed successfully!");
+            fsm.record_diagnostic(mission_time, "Landed successfully!");
             break;
         }
         
@@ -216,6 +187,6 @@ fn main() {
     }
     
     // Finish logging and flush
-    let _ = mcap_logger.finish();
+    let _ = fsm.stop_recording();
     println!("FSM execution ended");
 }
