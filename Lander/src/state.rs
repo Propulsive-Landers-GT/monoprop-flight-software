@@ -88,6 +88,35 @@ pub const JOG_MAX_THRUST_N: f64 = 1200.0;
 /// tick must not end the flight. Within this window the last valid sample is held.
 pub const IMU_TIMEOUT_S: f64 = 1.0;
 
+/// Reference acceleration for specific impulse in seconds, not local vehicle gravity.
+/// Rounded to 9.81 to preserve the original guidance and mass-depletion model.
+pub const STANDARD_GRAVITY_M_S2: f64 = 9.81;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PropulsionParameters {
+    /// Engine specific impulse [s].
+    pub specific_impulse_s: f64,
+}
+
+impl Default for PropulsionParameters {
+    fn default() -> Self {
+        Self { specific_impulse_s: 180.0 }
+    }
+}
+
+impl PropulsionParameters {
+    /// Propellant consumption per unit impulse [kg / (N s)].
+    pub fn alpha(&self) -> f64 {
+        1.0 / (self.specific_impulse_s * STANDARD_GRAVITY_M_S2)
+    }
+
+    /// Propellant consumption rate [kg/s] for a non-negative thrust magnitude [N].
+    pub fn mass_flow_rate(&self, thrust_n: f64) -> f64 {
+        // Keep the original division order for the compatibility profile.
+        thrust_n / (self.specific_impulse_s * STANDARD_GRAVITY_M_S2)
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VehicleState {
     pub position: Vector3<f64>,
@@ -100,13 +129,14 @@ pub struct VehicleState {
 
 impl Default for VehicleState {
     fn default() -> Self {
+        let vehicle = crate::vehicle::VehicleParameters::default();
         Self {
             position: Vector3::zeros(),
             velocity: Vector3::zeros(),
             attitude: UnitQuaternion::identity(),
             angular_velocity: Vector3::zeros(),
-            mass: 80.0,
-            dry_mass: 50.0,
+            mass: vehicle.initial_mass_kg(),
+            dry_mass: vehicle.dry_mass_kg(),
         }
     }
 }
@@ -146,6 +176,8 @@ pub struct ControlLoopState {
 
 impl Default for ControlLoopState {
     fn default() -> Self {
+        let vehicle_state = VehicleState::default();
+        let mass = vehicle_state.mass;
         Self {
             sensor_fusion_state: None,
             trajectory_state: None,
@@ -157,16 +189,16 @@ impl Default for ControlLoopState {
             last_valid_imu_time: 0.0,
             imu_rejecting: false,
             start_time: 0.0,
-            vehicle_state: VehicleState::default(),
+            vehicle_state,
             flight_terminated: false,
             flight_phase: FlightPhase::Standby,
             last_state_time: 0.0,
             trajectory_generation_time: 0.0,
             last_gimbal_theta: 0.0,
             last_gimbal_phi: 0.0,
-            last_thrust: 80.0 * 9.81,
+            last_thrust: mass * 9.81,
             last_rcs_command: 0.0,
-            mass: 80.0,
+            mass,
             termination_reason: None,
             diagnostics_queue: Vec::new(),
             control_mode: ControlMode::Auto,
