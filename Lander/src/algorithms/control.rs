@@ -165,6 +165,8 @@ impl MPC {
         let u_min = Array1::from(vec![-gimbal_limit, -gimbal_limit, thrust_min]);
         let u_max = Array1::from(vec![gimbal_limit, gimbal_limit, thrust_max]);
         
+        let trace = std::env::var_os("GTPL_NOV17_TRACE").is_some();
+        let warm_start_for_trace = if trace { u_warm.clone() } else { Vec::new() };
         let (u_warm_seq, _, u_apply) = mpc_crate::mpc_main(
             current_state,
             &mut u_warm,
@@ -184,6 +186,23 @@ impl MPC {
         let mut U_optimal = vec![u_apply];
         U_optimal.extend(u_warm_seq[0..self.n_steps - 1].to_vec());
         
+        if trace {
+            let mut violation = [0.0_f64; 3];
+            let mut warm_violation = [0.0_f64; 3];
+            let mut nonfinite = 0;
+            for (sequence, maxima) in [(&U_optimal, &mut violation), (&warm_start_for_trace, &mut warm_violation)] {
+                for u in sequence {
+                    for axis in 0..3 {
+                        if u[axis].is_finite() {
+                            maxima[axis] = maxima[axis].max((u_min[axis] - u[axis]).max(u[axis] - u_max[axis]));
+                        } else {
+                            nonfinite += 1;
+                        }
+                    }
+                }
+            }
+            eprintln!("NOV17_BOX final={violation:?} warm={warm_violation:?} nonfinite={nonfinite}");
+        }
         Ok(U_optimal)
     }
 }

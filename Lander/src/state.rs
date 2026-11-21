@@ -10,6 +10,8 @@ pub struct SensorData {
     pub timestamp: f64,
     pub imu_data: Option<ImuSample>,
     pub gps_data: Option<[f64; 3]>,
+    /// Successful acquisition time on the same monotonic clock as timestamp.
+    pub uwb_acquired_at: Option<f64>,
     pub uwb_data: Option<[f64; 3]>,
     pub chamber_pressure: Option<f64>,
     pub tank_pressure: Option<f64>,
