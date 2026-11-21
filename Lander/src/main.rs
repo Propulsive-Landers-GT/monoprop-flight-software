@@ -222,6 +222,7 @@ fn main() {
             timestamp: mission_time,
             imu_data,
             gps_data: Some([0.0, 0.0, 0.0]),
+            uwb_acquired_at: None,
             uwb_data: Some([0.0, 0.0, 0.0]),
             chamber_pressure: Some(15.0),
             tank_pressure: Some(300.0),

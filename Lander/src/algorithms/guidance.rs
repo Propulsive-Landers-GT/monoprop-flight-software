@@ -74,6 +74,14 @@ impl Lossless {
         };
 
         let result = solver.solve();
+        if std::env::var_os("GTPL_NOV17_TRACE").is_some() {
+            let tof = result.trajectory.as_ref().map(|t| t.time_of_flight_s);
+            eprintln!(
+                "NOV17_GUIDANCE wall={} budget={} coarse={} fine={} tof={tof:?} position={current_position:?} velocity={current_velocity:?}",
+                result.total_metrics.wall_time_s, solver.timeout,
+                result.coarse_metrics.attempts, result.fine_metrics.attempts,
+            );
+        }
         result.trajectory
     }
 }

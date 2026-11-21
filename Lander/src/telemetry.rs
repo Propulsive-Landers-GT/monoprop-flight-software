@@ -439,6 +439,7 @@ mod tests {
             timestamp: t,
             imu_data: Some(ImuSample::new(t, [0.1, 0.2, 9.81], [0.01, 0.02, 0.03]).with_mag([-2.0e-6, 22.0e-6, -44.3e-6])), // the EKF's world field [T], level vehicle
             gps_data: Some([0.0, 0.0, 0.0]),
+            uwb_acquired_at: None,
             uwb_data: Some([0.0, 0.0, 0.0]),
             chamber_pressure: Some(15.0),
             tank_pressure: Some(300.0),

@@ -45,6 +45,10 @@ impl ActuatorController {
             
             // TODO: Implement gain/calibration lookup tables to map target thrust (Newtons) to Main Throttle Valve (MTV) position commands (valve angle/CdA)
             
+            if std::env::var_os("GTPL_CONSTRAINT_DIAGNOSTICS").is_some()
+                || std::env::var_os("GTPL_NOV17_TRACE").is_some() {
+                eprintln!("ACTUATOR t={now} requested={first_control:?} applied={:?}", [gimbal_theta,gimbal_phi,thrust]);
+            }
             state.last_gimbal_theta = gimbal_theta;
             state.last_gimbal_phi = gimbal_phi;
             state.last_thrust = thrust;
@@ -62,4 +66,19 @@ impl ActuatorController {
             rcs_command,
         ]
     }
+}
+
+#[cfg(test)]
+mod constraint_tests {
+ use super::*;
+ #[test]
+ fn bounded_request_is_slew_limited_without_overshoot() {
+  let mut a=ActuatorController::new(); let mut s=ControlLoopState::default();
+  s.last_gimbal_theta=0.0; s.last_gimbal_phi=0.0;
+  let limit=15_f64.to_radians();
+  let first=a.update(&mut s,Some([limit,-limit,800.0]),1.0);
+  assert!((first[0]-2_f64.to_radians()).abs()<1e-12);
+  assert!((first[1]+2_f64.to_radians()).abs()<1e-12);
+  for k in 0..20 { let o=a.update(&mut s,Some([limit,-limit,800.0]),1.0+k as f64*0.02); assert!(o[0]<=limit && o[1]>=-limit); }
+ }
 }
